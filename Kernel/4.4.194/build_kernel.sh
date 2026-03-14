@@ -255,6 +255,7 @@ build_dtbo_overlays
 
 KERNEL_RELEASE="$(make -s O="${BUILD_DIR}" kernelrelease)"
 MODULES_RELEASE_DIR="${MODULES_STAGING_DIR}/lib/modules/${KERNEL_RELEASE}"
+OUT_MODULES_RELEASE_DIR="${OUT_DIR}/lib/modules/${KERNEL_RELEASE}"
 ZRAM_CONFIG="$(grep '^CONFIG_ZRAM=' "${BUILD_DIR}/.config" || true)"
 
 ZIMAGE_PATH="${BUILD_DIR}/arch/arm/boot/zImage"
@@ -277,7 +278,12 @@ printf '%s\n' "${KERNEL_RELEASE}" > "${OUT_DIR}/kernel.release"
 
 echo "[*] Installing modules into ${MODULES_STAGING_DIR}"
 rm -rf "${MODULES_RELEASE_DIR}"
+rm -rf "${OUT_MODULES_RELEASE_DIR}"
 make O="${BUILD_DIR}" INSTALL_MOD_PATH="${MODULES_STAGING_DIR}" modules_install
+
+echo "[*] Copying installed modules into ${OUT_DIR}/lib/modules"
+mkdir -p "${OUT_DIR}/lib/modules"
+cp -a "${MODULES_RELEASE_DIR}" "${OUT_DIR}/lib/modules/"
 
 if [[ "${ZRAM_CONFIG:-}" == "CONFIG_ZRAM=m" ]]; then
   if [[ -f "${STAGED_ZRAM_KO_PATH}" ]]; then
@@ -321,6 +327,9 @@ Kernel release: ${KERNEL_RELEASE}
 ZRAM config: ${ZRAM_CONFIG:-CONFIG_ZRAM is not set}
 
 Deploy the matching kernel image, DTB, DT overlays, and the full modules tree from:
+  ${OUT_MODULES_RELEASE_DIR}
+
+A second staged copy is also kept at:
   ${MODULES_RELEASE_DIR}
 
 Overlay files are copied to:
@@ -331,7 +340,8 @@ Then set armbianEnv.txt, for example:
   overlay_prefix=rk3128
   overlays=wlan-esp8089
 
-Replace the target's /lib/modules/${KERNEL_RELEASE} directory with the staged one.
+Replace the target's /lib/modules/${KERNEL_RELEASE} directory with:
+  ${OUT_MODULES_RELEASE_DIR}
 Do not keep an older zram.ko alongside a kernel that has zram built in or reconfigured,
 otherwise userspace modprobe can recreate the /class/zram-control duplicate warning.
 EOF
@@ -346,6 +356,7 @@ fi
 echo "    - ${OUT_DIR}/kernel.config"
 echo "    - ${OUT_DIR}/kernel.release"
 echo "    - ${MODULES_RELEASE_DIR}"
+echo "    - ${OUT_MODULES_RELEASE_DIR}"
 echo "    - ${OUT_DIR}/DEPLOYMENT.txt"
 echo "    - ${OUT_DIR}/zram.ko (if built as module)"
 echo "    - ${OUT_DIR}/esp8089.ko (if built)"
