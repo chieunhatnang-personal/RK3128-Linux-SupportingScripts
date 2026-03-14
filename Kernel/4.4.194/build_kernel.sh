@@ -9,6 +9,10 @@ CROSS_COMPILE_PREFIX="${TOOLCHAIN_DIR}/bin/arm-linux-gnueabihf-"
 ARCH="arm"
 JOBS="$(nproc)"
 
+# Optional in-file kernel source override. Exported KERNEL_DIR takes precedence.
+ENV_KERNEL_DIR="${KERNEL_DIR:-}"
+KERNEL_DIR="/mnt/Data/tvbox/rk3128/Kernel/legacy44/linux-kernel-4.4-rk3128-tvbox"
+
 usage() {
   echo "Usage: $0 [-h|--help]"
   echo "Builds the RK3128 kernel as zImage/zImage.gz."
@@ -18,10 +22,34 @@ usage() {
   echo "  - The script looks in ${SCRIPT_DIR} for one directory whose name contains '3128'"
   echo "    and that looks like a kernel source root."
   echo "  - Output is always generated in z format."
+  echo "  - build/ and out/ are created next to the resolved kernel directory."
+  echo "  - Any DTS overlays in arch/${ARCH}/boot/dts/overlay are compiled to dtbo and"
+  echo "    copied to out/overlay/."
   echo
   echo "Env overrides:"
+  echo "  KERNEL_DIR=/path/to/kernel            (priority: env > in-file KERNEL_DIR > auto-detect)"
   echo "  RK_DEFCONFIG=rk3128_linux_defconfig   (default: rk3128_linux_defconfig)"
   echo "  RK_DTS=rk3128-linux                   (default: rk3128-linux -> rk3128-linux.dtb)"
+}
+
+resolve_kernel_dir() {
+  local candidate="${1}"
+  local resolved
+
+  [[ -n "${candidate}" ]] || return 1
+
+  if [[ -d "${candidate}" ]]; then
+    resolved="${candidate}"
+  elif [[ "${candidate}" != /* && -d "${SCRIPT_DIR}/${candidate}" ]]; then
+    resolved="${SCRIPT_DIR}/${candidate}"
+  else
+    return 1
+  fi
+
+  (
+    cd "${resolved}" >/dev/null 2>&1
+    pwd
+  )
 }
 
 find_kernel_dir() {
@@ -48,6 +76,25 @@ find_kernel_dir() {
   printf '%s\n' "${matches[0]}"
 }
 
+validate_kernel_dir() {
+  local candidate="${1}"
+
+  if [[ ! -d "${candidate}" ]]; then
+    echo "ERROR: kernel dir not found: ${candidate}" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "${candidate}/Makefile" ]]; then
+    echo "ERROR: kernel dir is missing Makefile: ${candidate}" >&2
+    exit 1
+  fi
+
+  if [[ ! -d "${candidate}/arch/${ARCH}" ]]; then
+    echo "ERROR: kernel dir is missing arch/${ARCH}: ${candidate}" >&2
+    exit 1
+  fi
+}
+
 is_source_tree_dirty() {
   local -a dirty_paths=(
     ".config"
@@ -72,6 +119,64 @@ is_source_tree_dirty() {
   return 1
 }
 
+build_dtbo_overlays() {
+  local overlay_src_dir="${KERNEL_DIR}/arch/${ARCH}/boot/dts/overlay"
+  local overlay_build_dir="${BUILD_DIR}/arch/${ARCH}/boot/dts/overlay"
+  local overlay_out_dir="${OUT_DIR}/overlay"
+  local dtc_bin="${BUILD_DIR}/scripts/dtc/dtc"
+  local cpp_bin
+  local src name tmp out
+  local -a overlay_sources=()
+
+  if [[ ! -d "${overlay_src_dir}" ]]; then
+    echo "[*] No overlay DTS directory found: ${overlay_src_dir}"
+    return 0
+  fi
+
+  while IFS= read -r src; do
+    overlay_sources+=("${src}")
+  done < <(find "${overlay_src_dir}" -maxdepth 1 -type f -name '*.dts' | sort)
+
+  if [[ ${#overlay_sources[@]} -eq 0 ]]; then
+    echo "[*] No overlay DTS sources found in ${overlay_src_dir}"
+    return 0
+  fi
+
+  if [[ ! -x "${dtc_bin}" ]]; then
+    dtc_bin="${KERNEL_DIR}/scripts/dtc/dtc"
+  fi
+
+  if [[ ! -x "${dtc_bin}" ]]; then
+    echo "ERROR: dtc binary not found after kernel build" >&2
+    echo "       looked for ${BUILD_DIR}/scripts/dtc/dtc and ${KERNEL_DIR}/scripts/dtc/dtc" >&2
+    return 1
+  fi
+
+  cpp_bin="$(command -v cpp || true)"
+  if [[ -z "${cpp_bin}" ]]; then
+    echo "ERROR: host cpp not found" >&2
+    return 1
+  fi
+
+  rm -rf "${overlay_build_dir}" "${overlay_out_dir}"
+  mkdir -p "${overlay_build_dir}" "${overlay_out_dir}"
+
+  echo "[*] Building DT overlays"
+  for src in "${overlay_sources[@]}"; do
+    name="$(basename "${src}" .dts)"
+    tmp="${overlay_build_dir}/${name}.dts.tmp"
+    out="${overlay_build_dir}/${name}.dtbo"
+
+    echo "[*]   CPP ${name}.dts"
+    "${cpp_bin}"       -nostdinc       -I"${KERNEL_DIR}/arch/${ARCH}/boot/dts"       -I"${KERNEL_DIR}/scripts/dtc/include-prefixes"       -undef       -D__DTS__       -x assembler-with-cpp       -o "${tmp}"       "${src}"
+
+    echo "[*]   DTC ${name}.dtbo"
+    "${dtc_bin}"       -@       -O dtb       -o "${out}"       -b 0       -i "${overlay_src_dir}"       -i "${KERNEL_DIR}/arch/${ARCH}/boot/dts"       -Wno-unit_address_vs_reg       "${tmp}"
+
+    cp -av "${out}" "${overlay_out_dir}/"
+  done
+}
+
 case "${1:-}" in
   -h|--help)
     usage
@@ -84,9 +189,27 @@ if [[ $# -ne 0 ]]; then
   exit 1
 fi
 
-KERNEL_DIR="$(find_kernel_dir)"
-BUILD_DIR="${SCRIPT_DIR}/build"
-OUT_DIR="${SCRIPT_DIR}/out"
+if [[ -n "${ENV_KERNEL_DIR}" ]]; then
+  KERNEL_DIR_OVERRIDE="${ENV_KERNEL_DIR}"
+elif [[ -n "${KERNEL_DIR}" ]]; then
+  KERNEL_DIR_OVERRIDE="${KERNEL_DIR}"
+else
+  KERNEL_DIR_OVERRIDE=""
+fi
+
+if [[ -n "${KERNEL_DIR_OVERRIDE}" ]]; then
+  if ! KERNEL_DIR="$(resolve_kernel_dir "${KERNEL_DIR_OVERRIDE}")"; then
+    echo "ERROR: unable to resolve kernel dir: ${KERNEL_DIR_OVERRIDE}" >&2
+    exit 1
+  fi
+  validate_kernel_dir "${KERNEL_DIR}"
+else
+  KERNEL_DIR="$(find_kernel_dir)"
+fi
+ROOT_DIR="$(dirname "${KERNEL_DIR}")"
+BUILD_DIR="${ROOT_DIR}/build"
+OUT_DIR="${ROOT_DIR}/out"
+OVERLAY_OUT_DIR="${OUT_DIR}/overlay"
 MODULES_STAGING_DIR="${OUT_DIR}/modules"
 
 if [[ ! -x "${CROSS_COMPILE_PREFIX}gcc" ]]; then
@@ -127,6 +250,8 @@ make O="${BUILD_DIR}" olddefconfig
 
 echo "[*] Building zImage + dtbs + modules"
 make -j"${JOBS}" O="${BUILD_DIR}" zImage dtbs modules
+
+build_dtbo_overlays
 
 KERNEL_RELEASE="$(make -s O="${BUILD_DIR}" kernelrelease)"
 MODULES_RELEASE_DIR="${MODULES_STAGING_DIR}/lib/modules/${KERNEL_RELEASE}"
@@ -195,8 +320,16 @@ cat > "${OUT_DIR}/DEPLOYMENT.txt" <<EOF
 Kernel release: ${KERNEL_RELEASE}
 ZRAM config: ${ZRAM_CONFIG:-CONFIG_ZRAM is not set}
 
-Deploy the matching kernel image, DTB, and the full modules tree from:
+Deploy the matching kernel image, DTB, DT overlays, and the full modules tree from:
   ${MODULES_RELEASE_DIR}
+
+Overlay files are copied to:
+  ${OVERLAY_OUT_DIR}
+
+Copy the base DTB to /boot/dtb/ and the overlay .dtbo files to /boot/dtb/overlay/.
+Then set armbianEnv.txt, for example:
+  overlay_prefix=rk3128
+  overlays=wlan-esp8089
 
 Replace the target's /lib/modules/${KERNEL_RELEASE} directory with the staged one.
 Do not keep an older zram.ko alongside a kernel that has zram built in or reconfigured,
@@ -207,6 +340,9 @@ echo "[*] Done:"
 echo "    - ${OUT_DIR}/zImage"
 echo "    - ${OUT_DIR}/zImage.gz"
 echo "    - ${OUT_DIR}/${RK_DTS}.dtb (if built)"
+if [[ -d "${OVERLAY_OUT_DIR}" ]]; then
+  echo "    - ${OVERLAY_OUT_DIR}/*.dtbo (if built)"
+fi
 echo "    - ${OUT_DIR}/kernel.config"
 echo "    - ${OUT_DIR}/kernel.release"
 echo "    - ${MODULES_RELEASE_DIR}"
