@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ARMBIAN_ENV_TXT="/boot/armbianEnv.txt"
+DEVICE_TREE_OVERLAY_PATH="/boot/dtb/overlay"
+MODULES_LOAD_CONF="/etc/modules-load.d/rk3128-wifi.conf"
+BACKTITLE="Armbian RK3128 board configuration | chieunhatnang.de"
+TITLE="RK3128 Configuration"
+MENU_TITLE="Choose a setting to change"
+DIALOG_BIN="${DIALOG_BIN:-dialog}"
+
+declare -A WIFI_LABELS
+declare -A WIFI_MODULE_CANDIDATES
+declare -A WIFI_OVERLAY_CANDIDATES
+declare -A DISPLAY_MODES
+
+WIFI_LABELS["esp8089"]="ESP8089"
+WIFI_LABELS["ssv6051"]="SSV6051"
+WIFI_LABELS["rtl8189"]="Realtek8189"
+WIFI_LABELS["other"]="Other WiFi"
+
+WIFI_MODULE_CANDIDATES["esp8089"]="esp8089"
+WIFI_MODULE_CANDIDATES["ssv6051"]="ssv6051 ssv6x5x"
+WIFI_MODULE_CANDIDATES["rtl8189"]="8189es 8189fs 8189etv"
+WIFI_MODULE_CANDIDATES["other"]=""
+
+WIFI_OVERLAY_CANDIDATES["esp8089"]="wlan-esp8089"
+WIFI_OVERLAY_CANDIDATES["ssv6051"]="wlan-ssv6051 wlan-ssv6051p wlan-ssv6x5x"
+WIFI_OVERLAY_CANDIDATES["rtl8189"]="wlan-rtl8189es wlan-8189es wlan-rtl8189etv"
+WIFI_OVERLAY_CANDIDATES["other"]=""
+
+DISPLAY_MODES["1080p"]="video=HDMI-A-1:1920x1080@60e"
+DISPLAY_MODES["720p"]="video=HDMI-A-1:1280x720@60e"
+DISPLAY_MODES["1024x768"]="video=HDMI-A-1:1024x768@60e"
+
+CHANGED=0
+BACKUP_CREATED=0
+TEMP_FILE=""
+
+cleanup() {
+    if [ -n "${TEMP_FILE}" ] && [ -f "${TEMP_FILE}" ]; then
+        rm -f "${TEMP_FILE}"
+    fi
+}
+
+trap cleanup EXIT
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || die "Please run this script as root."
+}
+
+need_dialog() {
+    command -v "${DIALOG_BIN}" >/dev/null 2>&1 || die "dialog is required."
+}
+
+need_armbian_env() {
+    [ -f "${ARMBIAN_ENV_TXT}" ] || die "Missing ${ARMBIAN_ENV_TXT}"
+}
+
+dialog_menu() {
+    local prompt="$1"
+    shift
+    "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
+        --menu "${prompt}" 20 78 10 "$@" 2>&1 >/dev/tty
+}
+
+dialog_msg() {
+    "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
+        --msgbox "$1" 10 70
+}
+
+dialog_yesno() {
+    "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
+        --yesno "$1" 10 70
+}
+
+dialog_textbox_from_string() {
+    local content="$1"
+    local tmp
+
+    tmp="$(mktemp)"
+    printf '%s\n' "${content}" > "${tmp}"
+    "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
+        --textbox "${tmp}" 22 78
+    rm -f "${tmp}"
+}
+
+trim_spaces() {
+    awk '{$1=$1; print}'
+}
+
+create_backup_once() {
+    if [ "${BACKUP_CREATED}" -eq 0 ]; then
+        cp -f "${ARMBIAN_ENV_TXT}" "${ARMBIAN_ENV_TXT}.bak"
+        BACKUP_CREATED=1
+    fi
+}
+
+get_env_value() {
+    local key="$1"
+    awk -F= -v key="${key}" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "${ARMBIAN_ENV_TXT}"
+}
+
+set_env_value() {
+    local key="$1"
+    local value="$2"
+
+    create_backup_once
+    TEMP_FILE="$(mktemp)"
+
+    awk -F= -v key="${key}" -v value="${value}" '
+        BEGIN { updated = 0 }
+        $1 == key {
+            print key "=" value
+            updated = 1
+            next
+        }
+        { print }
+        END {
+            if (!updated) {
+                print key "=" value
+            }
+        }
+    ' "${ARMBIAN_ENV_TXT}" > "${TEMP_FILE}"
+
+    mv "${TEMP_FILE}" "${ARMBIAN_ENV_TXT}"
+    TEMP_FILE=""
+    CHANGED=1
+}
+
+overlay_exists() {
+    local overlay="$1"
+    [ -n "${overlay}" ] && [ -f "${DEVICE_TREE_OVERLAY_PATH}/${overlay_prefix:-rk3128}-${overlay}.dtbo" ]
+}
+
+is_known_wifi_overlay() {
+    local overlay="$1"
+    local key candidate
+
+    for key in "${!WIFI_OVERLAY_CANDIDATES[@]}"; do
+        for candidate in ${WIFI_OVERLAY_CANDIDATES[$key]}; do
+            [ "${overlay}" = "${candidate}" ] && return 0
+        done
+    done
+
+    return 1
+}
+
+resolve_wifi_overlay() {
+    local wifi_key="$1"
+    local candidate
+
+    for candidate in ${WIFI_OVERLAY_CANDIDATES[$wifi_key]}; do
+        if overlay_exists "${candidate}"; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+resolve_wifi_module() {
+    local wifi_key="$1"
+    local candidate
+
+    for candidate in ${WIFI_MODULE_CANDIDATES[$wifi_key]}; do
+        if modinfo "${candidate}" >/dev/null 2>&1; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    printf '%s\n' "${WIFI_MODULE_CANDIDATES[$wifi_key]%% *}"
+}
+
+read_overlays() {
+    local value
+    value="$(get_env_value overlays)"
+    printf '%s\n' "${value}"
+}
+
+write_overlays_without_wifi() {
+    local current filtered overlay
+    current="$(read_overlays)"
+    filtered=()
+
+    for overlay in ${current}; do
+        if ! is_known_wifi_overlay "${overlay}"; then
+            filtered+=("${overlay}")
+        fi
+    done
+
+    printf '%s\n' "${filtered[*]:-}"
+}
+
+apply_wifi_choice() {
+    local wifi_key="$1"
+    local current_overlays selected_overlay module preferred_module message
+    local -a overlays_to_write=()
+
+    current_overlays="$(write_overlays_without_wifi)"
+    if [ -n "${current_overlays}" ]; then
+        for selected_overlay in ${current_overlays}; do
+            overlays_to_write+=("${selected_overlay}")
+        done
+    fi
+
+    selected_overlay=""
+    if resolve_wifi_overlay "${wifi_key}" >/dev/null 2>&1; then
+        selected_overlay="$(resolve_wifi_overlay "${wifi_key}")"
+        overlays_to_write+=("${selected_overlay}")
+    fi
+
+    set_env_value "overlays" "${overlays_to_write[*]:-}"
+
+    preferred_module="$(resolve_wifi_module "${wifi_key}")"
+    if [ -n "${preferred_module}" ]; then
+        create_backup_once
+        mkdir -p "$(dirname "${MODULES_LOAD_CONF}")"
+        printf '%s\n' "${preferred_module}" > "${MODULES_LOAD_CONF}"
+    else
+        rm -f "${MODULES_LOAD_CONF}"
+    fi
+
+    for module in esp8089 ssv6051 ssv6x5x 8189es 8189fs 8189etv; do
+        modprobe -r "${module}" >/dev/null 2>&1 || true
+    done
+
+    if [ -n "${preferred_module}" ]; then
+        modprobe "${preferred_module}" >/dev/null 2>&1 || true
+    fi
+
+    message="Wireless interface set to ${WIFI_LABELS[$wifi_key]}."
+    if [ -n "${selected_overlay}" ]; then
+        message="${message}\nOverlay: ${selected_overlay}"
+    else
+        message="${message}\nOverlay: none"
+    fi
+    if [ -n "${preferred_module}" ]; then
+        message="${message}\nDriver module: ${preferred_module}"
+    else
+        message="${message}\nDriver module: none forced"
+    fi
+
+    dialog_msg "${message}"
+}
+
+clean_extraargs_video() {
+    local value="$1"
+    local token cleaned=()
+
+    for token in ${value}; do
+        case "${token}" in
+            video=HDMI-A-1:*)
+                ;;
+            *)
+                cleaned+=("${token}")
+                ;;
+        esac
+    done
+
+    printf '%s\n' "$(printf '%s ' "${cleaned[@]}" | trim_spaces)"
+}
+
+apply_display_choice() {
+    local display_key="$1"
+    local extraargs cleaned newargs mode
+
+    extraargs="$(get_env_value extraargs)"
+    cleaned="$(clean_extraargs_video "${extraargs}")"
+    mode="${DISPLAY_MODES[$display_key]}"
+
+    if [ -n "${cleaned}" ]; then
+        newargs="${cleaned} ${mode}"
+    else
+        newargs="${mode}"
+    fi
+
+    set_env_value "extraargs" "$(printf '%s\n' "${newargs}" | trim_spaces)"
+    dialog_msg "Display resolution set to ${display_key}.\nAdded: ${mode}"
+}
+
+current_wifi_label() {
+    local overlays module overlay key candidate
+
+    overlays="$(read_overlays)"
+    module=""
+    [ -f "${MODULES_LOAD_CONF}" ] && module="$(head -n 1 "${MODULES_LOAD_CONF}" 2>/dev/null || true)"
+
+    for key in esp8089 ssv6051 rtl8189; do
+        for candidate in ${WIFI_OVERLAY_CANDIDATES[$key]}; do
+            for overlay in ${overlays}; do
+                if [ "${overlay}" = "${candidate}" ]; then
+                    printf '%s\n' "${WIFI_LABELS[$key]}"
+                    return 0
+                fi
+            done
+        done
+
+        for candidate in ${WIFI_MODULE_CANDIDATES[$key]}; do
+            if [ -n "${candidate}" ] && [ "${module}" = "${candidate}" ]; then
+                printf '%s\n' "${WIFI_LABELS[$key]}"
+                return 0
+            fi
+        done
+    done
+
+    printf '%s\n' "${WIFI_LABELS[other]}"
+}
+
+current_display_label() {
+    local extraargs token
+
+    extraargs="$(get_env_value extraargs)"
+    for token in ${extraargs}; do
+        case "${token}" in
+            "${DISPLAY_MODES[1080p]}") printf '%s\n' "1920x1080" ; return 0 ;;
+            "${DISPLAY_MODES[720p]}") printf '%s\n' "1280x720" ; return 0 ;;
+            "${DISPLAY_MODES[1024x768]}") printf '%s\n' "1024x768" ; return 0 ;;
+        esac
+    done
+
+    printf '%s\n' "not set"
+}
+
+select_wifi_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select wireless interface\n\nCurrent: $(current_wifi_label)" \
+        "esp8089" "${WIFI_LABELS[esp8089]}" \
+        "ssv6051" "${WIFI_LABELS[ssv6051]}" \
+        "rtl8189" "${WIFI_LABELS[rtl8189]}" \
+        "other" "${WIFI_LABELS[other]}")" || return 1
+
+    apply_wifi_choice "${selection}"
+}
+
+select_display_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select HDMI display resolution\n\nCurrent: $(current_display_label)" \
+        "1080p" "1920x1080 @ 60Hz" \
+        "720p" "1280x720 @ 60Hz" \
+        "1024x768" "1024x768 @ 60Hz")" || return 1
+
+    apply_display_choice "${selection}"
+}
+
+show_summary() {
+    dialog_msg "Current settings:\n\nWireless: $(current_wifi_label)\nDisplay: $(current_display_label)\n\nFile updated: ${ARMBIAN_ENV_TXT}"
+}
+
+show_help() {
+    local content
+
+    content="RK3128 configuration guide
+
+Wireless selections
+-------------------
+ESP8089
+  Overlay candidates: ${WIFI_OVERLAY_CANDIDATES[esp8089]:-(none)}
+  Driver candidates : ${WIFI_MODULE_CANDIDATES[esp8089]:-(none)}
+
+SSV6051
+  Overlay candidates: ${WIFI_OVERLAY_CANDIDATES[ssv6051]:-(none)}
+  Driver candidates : ${WIFI_MODULE_CANDIDATES[ssv6051]:-(none)}
+
+Realtek8189
+  Overlay candidates: ${WIFI_OVERLAY_CANDIDATES[rtl8189]:-(none)}
+  Driver candidates : ${WIFI_MODULE_CANDIDATES[rtl8189]:-(none)}
+
+Other WiFi
+  Overlay candidates: none
+  Driver handling   : no forced module
+
+Display selections
+------------------
+1920x1080  -> ${DISPLAY_MODES[1080p]}
+1280x720   -> ${DISPLAY_MODES[720p]}
+1024x768   -> ${DISPLAY_MODES[1024x768]}
+
+Notes
+-----
+- WiFi selection updates /boot/armbianEnv.txt overlays=
+- Display selection updates /boot/armbianEnv.txt extraargs=
+- The script also writes ${MODULES_LOAD_CONF} for forced WiFi module loading
+- A reboot is recommended after changes"
+
+    dialog_textbox_from_string "${content}"
+}
+
+offer_reboot() {
+    if [ "${CHANGED}" -eq 0 ]; then
+        dialog_msg "No changes were made."
+        return 0
+    fi
+
+    if dialog_yesno "Settings were updated.\n\nA restart is required for all changes to take effect.\n\nRestart now?"; then
+        reboot
+    else
+        dialog_msg "Settings saved.\n\nPlease restart the board when convenient."
+    fi
+}
+
+main_menu() {
+    local selection
+
+    while true; do
+        selection="$(dialog_menu \
+            "${MENU_TITLE}\n\nWireless: $(current_wifi_label)\nDisplay: $(current_display_label)" \
+            "wifi" "Select wireless interface" \
+            "display" "Select display resolution" \
+            "summary" "Show current summary" \
+            "help" "Show overlay and driver mapping" \
+            "finish" "Save and exit")" || break
+
+        case "${selection}" in
+            wifi)
+                select_wifi_menu || true
+                ;;
+            display)
+                select_display_menu || true
+                ;;
+            summary)
+                show_summary
+                ;;
+            help)
+                show_help
+                ;;
+            finish)
+                break
+                ;;
+        esac
+    done
+}
+
+need_root
+need_dialog
+need_armbian_env
+
+overlay_prefix="$(get_env_value overlay_prefix)"
+overlay_prefix="${overlay_prefix:-rk3128}"
+
+main_menu
+offer_reboot
