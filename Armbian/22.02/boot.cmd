@@ -14,6 +14,7 @@ if test -z "${bootlogo}"; then setenv bootlogo false; fi
 if test -z "${rootfstype}"; then setenv rootfstype ext4; fi
 if test -z "${docker_optimizations}"; then setenv docker_optimizations on; fi
 if test -z "${mtdparts}"; then setenv mtdparts rk29xxnand:0x00002000@0x00002000(uboot),0x00002000@0x00004000(trust),0x00010000@0x00006000(boot),-@0x00016000(root); fi
+if test -z "${overlay_prefix}"; then setenv overlay_prefix rk3128; fi
 
 # If gpio3 pin 25 is 0, reset into MASKROM
 if gpio input D25; then
@@ -107,6 +108,22 @@ fdt addr ${fdt_addr_r}
 fdt resize 65536
 
 # Apply kernel overlays
+
+# For USB OTG support, either usb-otg-host or usb-otg-peripheral overlay must be applied. If none of them is set, apply usb-otg-host by default.
+setenv otg_overlay_set false
+for overlay_file in ${overlays}; do
+    if test "${overlay_file}" = "usb-otg-host"; then setenv otg_overlay_set true; fi
+    if test "${overlay_file}" = "usb-otg-peripheral"; then setenv otg_overlay_set true; fi
+done
+
+if test "${otg_overlay_set}" = "false"; then
+    if test -z "${overlays}"; then
+        setenv overlays "usb-otg-host"
+    else
+        setenv overlays "${overlays} usb-otg-host"
+    fi
+fi
+
 for overlay_file in ${overlays}; do
     if test "${devtype}" = "rknand"; then
         if ext4load ${devtype} ${bootpart} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-${overlay_file}.dtbo; then
