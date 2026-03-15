@@ -17,6 +17,8 @@ DIALOG_BIN="${DIALOG_BIN:-dialog}"
 declare -A WIFI_LABELS
 declare -A WIFI_MODULE_CANDIDATES
 declare -A WIFI_OVERLAY_CANDIDATES
+declare -A OTG_LABELS
+declare -A OTG_OVERLAY_CANDIDATES
 declare -A DISPLAY_MODES
 declare -A CPU_FREQ_VALUES
 declare -A CPU_GOVERNOR_LABELS
@@ -35,6 +37,12 @@ WIFI_OVERLAY_CANDIDATES["esp8089"]="wlan-esp8089"
 WIFI_OVERLAY_CANDIDATES["ssv6051"]="wlan-ssv6051 wlan-ssv6051p wlan-ssv6x5x"
 WIFI_OVERLAY_CANDIDATES["rtl8189"]="wlan-rtl8189es wlan-8189es wlan-rtl8189etv"
 WIFI_OVERLAY_CANDIDATES["other"]=""
+
+OTG_LABELS["host"]="Host"
+OTG_LABELS["peripheral"]="Peripheral"
+
+OTG_OVERLAY_CANDIDATES["host"]="usb-otg-host"
+OTG_OVERLAY_CANDIDATES["peripheral"]="usb-otg-peripheral"
 
 DISPLAY_MODES["1080p"]="video=HDMI-A-1:1920x1080@60e"
 DISPLAY_MODES["720p"]="video=HDMI-A-1:1280x720@60e"
@@ -197,6 +205,17 @@ is_known_wifi_overlay() {
     return 1
 }
 
+is_known_otg_overlay() {
+    local overlay="$1"
+    local key
+
+    for key in "${!OTG_OVERLAY_CANDIDATES[@]}"; do
+        [ "${overlay}" = "${OTG_OVERLAY_CANDIDATES[$key]}" ] && return 0
+    done
+
+    return 1
+}
+
 resolve_wifi_overlay() {
     local wifi_key="$1"
     local candidate
@@ -238,6 +257,20 @@ write_overlays_without_wifi() {
 
     for overlay in ${current}; do
         if ! is_known_wifi_overlay "${overlay}"; then
+            filtered+=("${overlay}")
+        fi
+    done
+
+    printf '%s\n' "${filtered[*]:-}"
+}
+
+write_overlays_without_otg() {
+    local current filtered overlay
+    current="$(read_overlays)"
+    filtered=()
+
+    for overlay in ${current}; do
+        if ! is_known_otg_overlay "${overlay}"; then
             filtered+=("${overlay}")
         fi
     done
@@ -294,6 +327,33 @@ apply_wifi_choice() {
         message="${message}\nDriver module: none forced"
     fi
 
+    dialog_msg "${message}"
+}
+
+apply_otg_choice() {
+    local otg_key="$1"
+    local current_overlays selected_overlay message
+    local -a overlays_to_write=()
+
+    current_overlays="$(write_overlays_without_otg)"
+    if [ -n "${current_overlays}" ]; then
+        for selected_overlay in ${current_overlays}; do
+            overlays_to_write+=("${selected_overlay}")
+        done
+    fi
+
+    selected_overlay="${OTG_OVERLAY_CANDIDATES[$otg_key]}"
+    if overlay_exists "${selected_overlay}"; then
+        overlays_to_write+=("${selected_overlay}")
+    else
+        dialog_msg "Missing overlay ${selected_overlay}.\nExpected file:\n${DEVICE_TREE_OVERLAY_PATH}/${overlay_prefix:-rk3128}-${selected_overlay}.dtbo"
+        return 1
+    fi
+
+    set_env_value "overlays" "${overlays_to_write[*]:-}"
+
+    message="USB OTG default mode set to ${OTG_LABELS[$otg_key]}."
+    message="${message}\nOverlay: ${selected_overlay}"
     dialog_msg "${message}"
 }
 
@@ -424,6 +484,22 @@ current_wifi_label() {
     printf '%s\n' "${WIFI_LABELS[other]}"
 }
 
+current_otg_label() {
+    local overlays overlay key
+
+    overlays="$(read_overlays)"
+    for key in host peripheral; do
+        for overlay in ${overlays}; do
+            if [ "${overlay}" = "${OTG_OVERLAY_CANDIDATES[$key]}" ]; then
+                printf '%s\n' "${OTG_LABELS[$key]}"
+                return 0
+            fi
+        done
+    done
+
+    printf '%s\n' "Host (boot default)"
+}
+
 current_display_label() {
     local extraargs token
 
@@ -503,6 +579,17 @@ select_wifi_menu() {
     apply_wifi_choice "${selection}"
 }
 
+select_otg_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select USB OTG boot mode\n\nCurrent: $(current_otg_label)" \
+        "host" "${OTG_LABELS[host]}" \
+        "peripheral" "${OTG_LABELS[peripheral]}")" || return 1
+
+    apply_otg_choice "${selection}" || true
+}
+
 select_display_menu() {
     local selection
 
@@ -516,7 +603,7 @@ select_display_menu() {
 }
 
 show_summary() {
-    dialog_msg "Current settings:\n\nWireless: $(current_wifi_label)\nDisplay: $(current_display_label)\nCPU max freq: $(current_cpu_freq_label)\nCPU governor: $(current_cpu_governor_label)\n\nFile updated: ${ARMBIAN_ENV_TXT}"
+    dialog_msg "Current settings:\n\nWireless: $(current_wifi_label)\nUSB OTG: $(current_otg_label)\nDisplay: $(current_display_label)\nCPU max freq: $(current_cpu_freq_label)\nCPU governor: $(current_cpu_governor_label)\n\nFile updated: ${ARMBIAN_ENV_TXT}"
 }
 
 show_help() {
@@ -548,6 +635,11 @@ Display selections
 1280x720   -> ${DISPLAY_MODES[720p]}
 1024x768   -> ${DISPLAY_MODES[1024x768]}
 
+USB OTG selections
+------------------
+Host        -> ${OTG_OVERLAY_CANDIDATES[host]}
+Peripheral  -> ${OTG_OVERLAY_CANDIDATES[peripheral]}
+
 CPU selections
 --------------
 Max frequency path : ${CPU_MAX_FREQ_PATH}
@@ -576,6 +668,7 @@ Governor order
 Notes
 -----
 - WiFi selection updates /boot/armbianEnv.txt overlays=
+- USB OTG selection updates /boot/armbianEnv.txt overlays=
 - Display selection updates /boot/armbianEnv.txt extraargs=
 - The script also writes ${MODULES_LOAD_CONF} for forced WiFi module loading
 - CPU options are applied immediately through sysfs
@@ -603,8 +696,9 @@ main_menu() {
 
     while true; do
         selection="$(dialog_menu \
-            "${MENU_TITLE}\n\nWireless: $(current_wifi_label)\nDisplay: $(current_display_label)\nCPU max: $(current_cpu_freq_label)\nGovernor: $(current_cpu_governor_label)" \
+            "${MENU_TITLE}\n\nWireless: $(current_wifi_label)\nUSB OTG: $(current_otg_label)\nDisplay: $(current_display_label)\nCPU max: $(current_cpu_freq_label)\nGovernor: $(current_cpu_governor_label)" \
             "wifi" "Select wireless interface" \
+            "otg" "Select USB OTG boot mode" \
             "display" "Select display resolution" \
             "cpu" "CPU config" \
             "summary" "Show current summary" \
@@ -614,6 +708,9 @@ main_menu() {
         case "${selection}" in
             wifi)
                 select_wifi_menu || true
+                ;;
+            otg)
+                select_otg_menu || true
                 ;;
             display)
                 select_display_menu || true
