@@ -5,6 +5,10 @@ set -euo pipefail
 ARMBIAN_ENV_TXT="/boot/armbianEnv.txt"
 DEVICE_TREE_OVERLAY_PATH="/boot/dtb/overlay"
 MODULES_LOAD_CONF="/etc/modules-load.d/rk3128-wifi.conf"
+CPU_MAX_FREQ_PATH="/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq"
+CPU_GOVERNOR_PATH="/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+CPUFREQUTILS_CONF="/etc/default/cpufrequtils"
+CPU_MIN_FREQ_VALUE="216000"
 BACKTITLE="Armbian RK3128 board configuration | chieunhatnang.de"
 TITLE="RK3128 Configuration"
 MENU_TITLE="Choose a setting to change"
@@ -14,6 +18,8 @@ declare -A WIFI_LABELS
 declare -A WIFI_MODULE_CANDIDATES
 declare -A WIFI_OVERLAY_CANDIDATES
 declare -A DISPLAY_MODES
+declare -A CPU_FREQ_VALUES
+declare -A CPU_GOVERNOR_LABELS
 
 WIFI_LABELS["esp8089"]="ESP8089"
 WIFI_LABELS["ssv6051"]="SSV6051"
@@ -33,6 +39,17 @@ WIFI_OVERLAY_CANDIDATES["other"]=""
 DISPLAY_MODES["1080p"]="video=HDMI-A-1:1920x1080@60e"
 DISPLAY_MODES["720p"]="video=HDMI-A-1:1280x720@60e"
 DISPLAY_MODES["1024x768"]="video=HDMI-A-1:1024x768@60e"
+
+CPU_FREQ_VALUES["816"]="816000"
+CPU_FREQ_VALUES["1008"]="1008000"
+CPU_FREQ_VALUES["1200"]="1200000"
+
+CPU_GOVERNOR_LABELS["powersave"]="powersave"
+CPU_GOVERNOR_LABELS["conservative"]="conservative"
+CPU_GOVERNOR_LABELS["ondemand"]="ondemand"
+CPU_GOVERNOR_LABELS["interactive"]="interactive"
+CPU_GOVERNOR_LABELS["userspace"]="userspace"
+CPU_GOVERNOR_LABELS["performance"]="performance"
 
 CHANGED=0
 BACKUP_CREATED=0
@@ -61,6 +78,34 @@ need_dialog() {
 
 need_armbian_env() {
     [ -f "${ARMBIAN_ENV_TXT}" ] || die "Missing ${ARMBIAN_ENV_TXT}"
+}
+
+need_cpu_sysfs() {
+    [ -w "${CPU_MAX_FREQ_PATH}" ] || die "Missing or unwritable ${CPU_MAX_FREQ_PATH}"
+    [ -w "${CPU_GOVERNOR_PATH}" ] || die "Missing or unwritable ${CPU_GOVERNOR_PATH}"
+}
+
+read_cpufrequtils_value() {
+    local key="$1"
+
+    if [ -r "${CPUFREQUTILS_CONF}" ]; then
+        awk -F= -v key="${key}" '$1 == key {print $2; exit}' "${CPUFREQUTILS_CONF}"
+    fi
+}
+
+write_cpufrequtils() {
+    local max_speed="$1"
+    local governor="$2"
+    local temp_file
+
+    temp_file="$(mktemp)"
+    cat > "${temp_file}" <<EOF
+ENABLE=true
+MIN_SPEED=${CPU_MIN_FREQ_VALUE}
+MAX_SPEED=${max_speed}
+GOVERNOR=${governor}
+EOF
+    mv "${temp_file}" "${CPUFREQUTILS_CONF}"
 }
 
 dialog_menu() {
@@ -287,6 +332,70 @@ apply_display_choice() {
     dialog_msg "Display resolution set to ${display_key}.\nAdded: ${mode}"
 }
 
+read_cpu_max_freq() {
+    cat "${CPU_MAX_FREQ_PATH}" 2>/dev/null || true
+}
+
+read_cpu_governor() {
+    cat "${CPU_GOVERNOR_PATH}" 2>/dev/null || true
+}
+
+format_khz_as_mhz() {
+    local khz="$1"
+
+    if [ -z "${khz}" ]; then
+        printf '%s\n' "unknown"
+        return 0
+    fi
+
+    awk -v khz="${khz}" 'BEGIN { printf "%.0f MHz", khz / 1000 }'
+}
+
+current_cpu_freq_label() {
+    local current
+
+    current="$(read_cpu_max_freq)"
+    if [ -z "${current}" ]; then
+        printf '%s\n' "unknown"
+    else
+        printf '%s (%s KHz)\n' "$(format_khz_as_mhz "${current}")" "${current}"
+    fi
+}
+
+current_cpu_governor_label() {
+    local current
+
+    current="$(read_cpu_governor)"
+    printf '%s\n' "${current:-unknown}"
+}
+
+apply_cpu_freq_choice() {
+    local freq_key="$1"
+    local value="${CPU_FREQ_VALUES[$freq_key]}"
+    local governor
+
+    printf '%s\n' "${value}" > "${CPU_MAX_FREQ_PATH}"
+    governor="$(read_cpu_governor)"
+    governor="${governor:-$(read_cpufrequtils_value GOVERNOR)}"
+    governor="${governor:-ondemand}"
+    write_cpufrequtils "${value}" "${governor}"
+    CHANGED=1
+    dialog_msg "CPU max frequency set to ${freq_key} MHz.\nWritten value: ${value} KHz\nPersistent config updated: ${CPUFREQUTILS_CONF}"
+}
+
+apply_cpu_governor_choice() {
+    local governor="$1"
+    local max_speed
+
+    printf '%s\n' "${governor}" > "${CPU_GOVERNOR_PATH}"
+    max_speed="$(read_cpu_max_freq)"
+    max_speed="${max_speed:-$(read_cpufrequtils_value MAX_SPEED)}"
+    max_speed="${max_speed:-${CPU_FREQ_VALUES[1200]}}"
+    write_cpufrequtils "${max_speed}" "${governor}"
+    CHANGED=1
+    dialog_msg "CPU governor set to ${governor}.\nPersistent config updated: ${CPUFREQUTILS_CONF}"
+}
+
 current_wifi_label() {
     local overlays module overlay key candidate
 
@@ -330,6 +439,57 @@ current_display_label() {
     printf '%s\n' "not set"
 }
 
+select_cpu_freq_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select CPU max frequency\n\nCurrent: $(current_cpu_freq_label)" \
+        "816" "816 MHz (safest/stablest)" \
+        "1008" "1008 MHz" \
+        "1200" "1200 MHz (highest)" )" || return 1
+
+    apply_cpu_freq_choice "${selection}"
+}
+
+select_cpu_governor_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select CPU governor\n\nCurrent: $(current_cpu_governor_label)" \
+        "powersave" "${CPU_GOVERNOR_LABELS[powersave]}" \
+        "conservative" "${CPU_GOVERNOR_LABELS[conservative]}" \
+        "ondemand" "${CPU_GOVERNOR_LABELS[ondemand]}" \
+        "interactive" "${CPU_GOVERNOR_LABELS[interactive]}" \
+        "userspace" "${CPU_GOVERNOR_LABELS[userspace]}" \
+        "performance" "${CPU_GOVERNOR_LABELS[performance]}")" || return 1
+
+    apply_cpu_governor_choice "${selection}"
+}
+
+select_cpu_menu() {
+    local selection
+
+    while true; do
+        selection="$(dialog_menu \
+            "CPU configuration\n\nMax frequency: $(current_cpu_freq_label)\nGovernor: $(current_cpu_governor_label)" \
+            "freq" "Set CPU max frequency" \
+            "governor" "Set CPU governor" \
+            "back" "Return to main menu")" || return 1
+
+        case "${selection}" in
+            freq)
+                select_cpu_freq_menu || true
+                ;;
+            governor)
+                select_cpu_governor_menu || true
+                ;;
+            back)
+                break
+                ;;
+        esac
+    done
+}
+
 select_wifi_menu() {
     local selection
 
@@ -356,7 +516,7 @@ select_display_menu() {
 }
 
 show_summary() {
-    dialog_msg "Current settings:\n\nWireless: $(current_wifi_label)\nDisplay: $(current_display_label)\n\nFile updated: ${ARMBIAN_ENV_TXT}"
+    dialog_msg "Current settings:\n\nWireless: $(current_wifi_label)\nDisplay: $(current_display_label)\nCPU max freq: $(current_cpu_freq_label)\nCPU governor: $(current_cpu_governor_label)\n\nFile updated: ${ARMBIAN_ENV_TXT}"
 }
 
 show_help() {
@@ -388,11 +548,38 @@ Display selections
 1280x720   -> ${DISPLAY_MODES[720p]}
 1024x768   -> ${DISPLAY_MODES[1024x768]}
 
+CPU selections
+--------------
+Max frequency path : ${CPU_MAX_FREQ_PATH}
+Governor path      : ${CPU_GOVERNOR_PATH}
+Persistent config  : ${CPUFREQUTILS_CONF}
+
+CPU max frequency options
+  816 MHz   -> ${CPU_FREQ_VALUES[816]} KHz
+  1008 MHz  -> ${CPU_FREQ_VALUES[1008]} KHz
+  1200 MHz  -> ${CPU_FREQ_VALUES[1200]} KHz
+  MIN speed -> ${CPU_MIN_FREQ_VALUE} KHz in cpufrequtils
+
+Reason
+  Some RK3128 boards become unstable at their highest clock.
+  Lowering the CPU max frequency can reduce random hangs, freezes,
+  and boot issues on weaker boards or marginal power supplies.
+
+Governor order
+  powersave     -> lowest power usage
+  conservative  -> prefers slower ramp-up
+  ondemand      -> balanced
+  interactive   -> more responsive
+  userspace     -> manual userspace control
+  performance   -> highest performance
+
 Notes
 -----
 - WiFi selection updates /boot/armbianEnv.txt overlays=
 - Display selection updates /boot/armbianEnv.txt extraargs=
 - The script also writes ${MODULES_LOAD_CONF} for forced WiFi module loading
+- CPU options are applied immediately through sysfs
+- CPU changes also update ${CPUFREQUTILS_CONF}
 - A reboot is recommended after changes"
 
     dialog_textbox_from_string "${content}"
@@ -416,9 +603,10 @@ main_menu() {
 
     while true; do
         selection="$(dialog_menu \
-            "${MENU_TITLE}\n\nWireless: $(current_wifi_label)\nDisplay: $(current_display_label)" \
+            "${MENU_TITLE}\n\nWireless: $(current_wifi_label)\nDisplay: $(current_display_label)\nCPU max: $(current_cpu_freq_label)\nGovernor: $(current_cpu_governor_label)" \
             "wifi" "Select wireless interface" \
             "display" "Select display resolution" \
+            "cpu" "CPU config" \
             "summary" "Show current summary" \
             "help" "Show overlay and driver mapping" \
             "finish" "Save and exit")" || break
@@ -429,6 +617,9 @@ main_menu() {
                 ;;
             display)
                 select_display_menu || true
+                ;;
+            cpu)
+                select_cpu_menu || true
                 ;;
             summary)
                 show_summary
@@ -446,6 +637,7 @@ main_menu() {
 need_root
 need_dialog
 need_armbian_env
+need_cpu_sysfs
 
 overlay_prefix="$(get_env_value overlay_prefix)"
 overlay_prefix="${overlay_prefix:-rk3128}"
