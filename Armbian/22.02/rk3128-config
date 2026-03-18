@@ -280,7 +280,7 @@ write_overlays_without_otg() {
 
 apply_wifi_choice() {
     local wifi_key="$1"
-    local current_overlays selected_overlay module preferred_module message
+    local current_overlays selected_overlay preferred_module message
     local -a overlays_to_write=()
 
     current_overlays="$(write_overlays_without_wifi)"
@@ -307,14 +307,6 @@ apply_wifi_choice() {
         rm -f "${MODULES_LOAD_CONF}"
     fi
 
-    for module in esp8089 ssv6051 ssv6x5x 8189es 8189fs 8189etv; do
-        modprobe -r "${module}" >/dev/null 2>&1 || true
-    done
-
-    if [ -n "${preferred_module}" ]; then
-        modprobe "${preferred_module}" >/dev/null 2>&1 || true
-    fi
-
     message="Wireless interface set to ${WIFI_LABELS[$wifi_key]}."
     if [ -n "${selected_overlay}" ]; then
         message="${message}\nOverlay: ${selected_overlay}"
@@ -322,9 +314,11 @@ apply_wifi_choice() {
         message="${message}\nOverlay: none"
     fi
     if [ -n "${preferred_module}" ]; then
-        message="${message}\nDriver module: ${preferred_module}"
+        message="${message}\nDriver module on next boot: ${preferred_module}"
+        message="${message}\nModule will be loaded by ${MODULES_LOAD_CONF} after restart, once the DT overlay is active."
     else
         message="${message}\nDriver module: none forced"
+        message="${message}\nAutomatic driver probing will happen after restart."
     fi
 
     dialog_msg "${message}"
@@ -670,7 +664,8 @@ Notes
 - WiFi selection updates /boot/armbianEnv.txt overlays=
 - USB OTG selection updates /boot/armbianEnv.txt overlays=
 - Display selection updates /boot/armbianEnv.txt extraargs=
-- The script also writes ${MODULES_LOAD_CONF} for forced WiFi module loading
+- The script writes ${MODULES_LOAD_CONF} to load the selected WiFi module on boot
+- WiFi modules are not modprobed immediately because the new DT overlay is only active after reboot
 - CPU options are applied immediately through sysfs
 - CPU changes also update ${CPUFREQUTILS_CONF}
 - A reboot is recommended after changes"
