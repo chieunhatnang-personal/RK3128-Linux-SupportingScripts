@@ -15,6 +15,8 @@ if test -z "${rootfstype}"; then setenv rootfstype ext4; fi
 if test -z "${docker_optimizations}"; then setenv docker_optimizations on; fi
 if test -z "${mtdparts}"; then setenv mtdparts rk29xxnand:0x00002000@0x00002000(uboot),0x00002000@0x00004000(trust),0x00010000@0x00006000(boot),-@0x00016000(root); fi
 if test -z "${overlay_prefix}"; then setenv overlay_prefix rk3128; fi
+if test -z "${partnum}"; then setenv partnum 1; fi
+if test -z "${rootpartname}"; then setenv nandrootpartname root; fi
 
 # If gpio3 pin 25 is 0, reset into MASKROM
 if gpio input D25; then
@@ -23,22 +25,13 @@ if gpio input D25; then
     reset
 fi
 
-echo "Boot script loaded from ${devtype} ${devnum}"
-
-if test "${devtype}" = "rknand"; then
-    setenv bootpart "${devnum}:1"
-    echo "Using ext4load for RKNAND boot files from ${devtype} ${bootpart}"
-else
-    setenv bootpart "${devnum}"
-fi
+echo "[DEBUG] ========= Boot script loaded from ${devtype} ${devnum}"
+setenv bootpart "${devnum}:${partnum}"
+echo "[DEBUG] ========= Boot files will be loaded from ${devtype} ${bootpart}"
 
 # Load armbianEnv.txt if present
 if test -e ${devtype} ${bootpart} ${prefix}armbianEnv.txt; then
-    if test "${devtype}" = "rknand"; then
-        ext4load ${devtype} ${bootpart} ${load_addr} ${prefix}armbianEnv.txt
-    else
-        load ${devtype} ${bootpart} ${load_addr} ${prefix}armbianEnv.txt
-    fi
+    load ${devtype} ${bootpart} ${load_addr} ${prefix}armbianEnv.txt
     env import -t ${load_addr} ${filesize}
 fi
 
@@ -47,28 +40,29 @@ if test -z "${rootdev}"; then
 
     if test "${devtype}" = "mmc"; then
         echo "Detected MMC boot (device ${devnum})"
-        setenv rootdev "/dev/mmcblk${devnum}p1"
+        setenv rootdev "/dev/mmcblk${devnum}p${partnum}"
     fi
 
     if test "${devtype}" = "usb"; then
         echo "Detected USB boot"
-        setenv rootdev "/dev/sda1"
+        setenv rootdev "/dev/sda${partnum}"
     fi
 
     if test "${devtype}" = "rknand"; then
         echo "Detected NAND boot"
-        setenv rootdev "/dev/rknand_root"
+        setenv rootdev "/dev/rknand_${rootpartname}"
     fi
 
 fi
 
+echo "[DEBUG] ========= NAND root partition name: ${nandrootpartname}"
 echo "[DEBUG] ========= Root device: ${rootdev}"
 
 if test "${logo}" = "disabled"; then setenv logo "logo.nologo"; fi
 
 # get PARTUUID if booted from MMC
 if test "${devtype}" = "mmc"; then
-    part uuid mmc ${devnum}:1 partuuid
+    part uuid mmc ${devnum}:${partnum} partuuid
 fi
 
 if test "${bootlogo}" = "true"; then
@@ -83,27 +77,15 @@ fi
 
 # Load initrd
 echo "[DEBUG] ========= Loading initrd from: ${devtype} ${bootpart} ${ramdisk_addr_r} ${prefix}uInitrd"
-if test "${devtype}" = "rknand"; then
-    ext4load ${devtype} ${bootpart} ${ramdisk_addr_r} ${prefix}uInitrd
-else
-    load ${devtype} ${bootpart} ${ramdisk_addr_r} ${prefix}uInitrd
-fi
+load ${devtype} ${bootpart} ${ramdisk_addr_r} ${prefix}uInitrd
 
 # Load kernel
 echo "[DEBUG] ========= Loading kernel from: ${devtype} ${bootpart} ${kernel_addr_r} ${prefix}zImage"
-if test "${devtype}" = "rknand"; then
-    ext4load ${devtype} ${bootpart} ${kernel_addr_r} ${prefix}zImage
-else
-    load ${devtype} ${bootpart} ${kernel_addr_r} ${prefix}zImage
-fi
+load ${devtype} ${bootpart} ${kernel_addr_r} ${prefix}zImage
 
 # Load device tree
 echo "[DEBUG] ========= Loading dtb from: ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}"
-if test "${devtype}" = "rknand"; then
-    ext4load ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
-else
-    load ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
-fi
+load ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
 fdt addr ${fdt_addr_r}
 fdt resize 65536
 
@@ -125,65 +107,34 @@ if test "${otg_overlay_set}" = "false"; then
 fi
 
 for overlay_file in ${overlays}; do
-    if test "${devtype}" = "rknand"; then
-        if ext4load ${devtype} ${bootpart} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-${overlay_file}.dtbo; then
-            echo "[DEBUG] ========= Applying kernel overlay ${overlay_prefix}-${overlay_file}.dtbo"
-            fdt apply ${load_addr} || setenv overlay_error true
-        fi
-    else
-        if load ${devtype} ${bootpart} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-${overlay_file}.dtbo; then
-            echo "[DEBUG] ========= Applying kernel overlay ${overlay_prefix}-${overlay_file}.dtbo"
-            fdt apply ${load_addr} || setenv overlay_error true
-        fi
+    if load ${devtype} ${bootpart} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-${overlay_file}.dtbo; then
+        echo "[DEBUG] ========= Applying kernel overlay ${overlay_prefix}-${overlay_file}.dtbo"
+        fdt apply ${load_addr} || setenv overlay_error true
     fi
 done
 
 # Apply user overlays
 for overlay_file in ${user_overlays}; do
-    if test "${devtype}" = "rknand"; then
-        if ext4load ${devtype} ${bootpart} ${load_addr} ${prefix}overlay-user/${overlay_file}.dtbo; then
-            echo "[DEBUG] ========= Applying user overlay ${overlay_file}.dtbo"
-            fdt apply ${load_addr} || setenv overlay_error true
-        fi
-    else
-        if load ${devtype} ${bootpart} ${load_addr} ${prefix}overlay-user/${overlay_file}.dtbo; then
-            echo "[DEBUG] ========= Applying user overlay ${overlay_file}.dtbo"
-            fdt apply ${load_addr} || setenv overlay_error true
-        fi
+    if load ${devtype} ${bootpart} ${load_addr} ${prefix}overlay-user/${overlay_file}.dtbo; then
+        echo "[DEBUG] ========= Applying user overlay ${overlay_file}.dtbo"
+        fdt apply ${load_addr} || setenv overlay_error true
     fi
 done
 
 # Fixup scripts
 if test "${overlay_error}" = "true"; then
     echo "Overlay error, restoring original DT"
-    if test "${devtype}" = "rknand"; then
-        ext4load ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
-    else
-        load ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
-    fi
+    load ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
 else
-    if test "${devtype}" = "rknand"; then
-        if ext4load ${devtype} ${bootpart} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-fixup.scr; then
-            echo "[DEBUG] ========= Applying fixup script"
-            source ${load_addr}
-        fi
+    if load ${devtype} ${bootpart} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-fixup.scr; then
+        echo "[DEBUG] ========= Applying fixup script"
+        source ${load_addr}
+    fi
 
-        if test -e ${devtype} ${bootpart} ${prefix}fixup.scr; then
-            ext4load ${devtype} ${bootpart} ${load_addr} ${prefix}fixup.scr
-            echo "[DEBUG] ========= Applying user fixup script"
-            source ${load_addr}
-        fi
-    else
-        if load ${devtype} ${bootpart} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-fixup.scr; then
-            echo "[DEBUG] ========= Applying fixup script"
-            source ${load_addr}
-        fi
-
-        if test -e ${devtype} ${bootpart} ${prefix}fixup.scr; then
-            load ${devtype} ${bootpart} ${load_addr} ${prefix}fixup.scr
-            echo "[DEBUG] ========= Applying user fixup script"
-            source ${load_addr}
-        fi
+    if test -e ${devtype} ${bootpart} ${prefix}fixup.scr; then
+        load ${devtype} ${bootpart} ${load_addr} ${prefix}fixup.scr
+        echo "[DEBUG] ========= Applying user fixup script"
+        source ${load_addr}
     fi
 fi
 
