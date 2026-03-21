@@ -5,7 +5,7 @@ set -euo pipefail
 MOUNT_DIR="/mnt/armbian"
 ROOTFS_IMG="armbian_rootfs.img"
 DEFAULT_EXTEND_SIZE="100M"
-DEFAULT_SHRINK_PADDING="64M"
+DEFAULT_SHRINK_PADDING="39M"
 
 usage() {
     local status="${1:-1}"
@@ -112,6 +112,42 @@ size_to_bytes() {
     fi
 }
 
+normalize_extend_size() {
+    local value="${1:-}"
+
+    value="${value//[[:space:]]/}"
+
+    if [ -z "$value" ]; then
+        printf '%s\n' "$DEFAULT_EXTEND_SIZE"
+        return 0
+    fi
+
+    if [ "$value" = "0" ]; then
+        printf '0\n'
+        return 0
+    fi
+
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        printf '%sM\n' "$value"
+        return 0
+    fi
+
+    if [[ "$value" =~ ^[0-9]+([KkMmGgTtPp]([Bb]|[iI][Bb])?)$ ]]; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+
+    die "Invalid extend size: $value. Use 0 to skip, a plain number for MiB (example: 100), or a size like 100M, 1G, 512MiB."
+}
+
+shrink_padding_blocks() {
+    local block_size="$1"
+    local padding_bytes
+
+    padding_bytes="$(size_to_bytes "$DEFAULT_SHRINK_PADDING")"
+    echo $(( (padding_bytes + block_size - 1) / block_size ))
+}
+
 get_fs_header_value() {
     local dev="$1"
     local field="$2"
@@ -143,6 +179,8 @@ extend_filesystem() {
     local img="$1"
     local inc="${2:-$DEFAULT_EXTEND_SIZE}"
     local old_size new_size
+
+    inc="$(normalize_extend_size "$inc")"
 
     old_size="$(stat -c%s "$img")"
 
@@ -219,9 +257,8 @@ umount_loop_image() {
 repack_shrink_filesystem() {
     local img="$1"
     local block_size="$2"
-    local free_blocks="$3"
-    local old_size="$4"
-    local used_blocks target_bytes temp_img src_mnt dst_mnt src_loop dst_loop actual_new_size
+    local old_size="$3"
+    local used_blocks padding_blocks target_blocks target_bytes temp_img src_mnt dst_mnt src_loop dst_loop actual_new_size actual_free_bytes
 
     used_blocks="$(sudo dumpe2fs -h "$img" 2>/dev/null | awk -F: '
         /^Block count:/ {gsub(/ /, "", $2); block_count=$2}
@@ -232,7 +269,9 @@ repack_shrink_filesystem() {
         die "Failed to determine used block count for repack: $img"
     fi
 
-    target_bytes=$((used_blocks * block_size + $(size_to_bytes "$DEFAULT_SHRINK_PADDING")))
+    padding_blocks="$(shrink_padding_blocks "$block_size")"
+    target_blocks=$((used_blocks + padding_blocks))
+    target_bytes=$((target_blocks * block_size))
     temp_img="${img}.repack.tmp"
     src_mnt="$(mktemp -d /tmp/rk3128-src.XXXXXX)"
     dst_mnt="$(mktemp -d /tmp/rk3128-dst.XXXXXX)"
@@ -247,8 +286,8 @@ repack_shrink_filesystem() {
 
     trap cleanup_repack EXIT
 
-    echo "Repacking into a fresh ext4 image to reclaim free space..."
-    echo "Target size before final tighten: $(human_size "$target_bytes") (${target_bytes} bytes)"
+    echo "Repacking into a fresh ext4 image to leave about ${DEFAULT_SHRINK_PADDING} free..."
+    echo "Target image size: $(human_size "$target_bytes") (${target_bytes} bytes)"
 
     truncate -s "$target_bytes" "$temp_img"
     sudo mkfs.ext4 -F -q -b "$block_size" "$temp_img"
@@ -265,10 +304,9 @@ repack_shrink_filesystem() {
     dst_loop=""
 
     sudo e2fsck -f -y "$temp_img" >/dev/null
-    sudo resize2fs -M "$temp_img" >/dev/null
 
-    actual_new_size="$(( $(get_fs_header_value "$temp_img" "^Block size$") * $(get_fs_header_value "$temp_img" "^Block count$") ))"
-    truncate -s "$actual_new_size" "$temp_img"
+    actual_new_size="$(stat -c%s "$temp_img")"
+    actual_free_bytes="$(get_image_free_space_bytes "$temp_img")"
     mv -f "$temp_img" "$img"
 
     trap - EXIT
@@ -276,11 +314,12 @@ repack_shrink_filesystem() {
 
     echo "Repacked shrink completed."
     echo "Size: $(human_size "$old_size") (${old_size} bytes) -> $(human_size "$actual_new_size") (${actual_new_size} bytes)"
+    echo "Free space left in filesystem: $(human_size "$actual_free_bytes") (target: about ${DEFAULT_SHRINK_PADDING})"
 }
 
 shrink_filesystem() {
     local img="$1"
-    local old_size block_size block_count free_blocks new_size actual_new_size freed_bytes
+    local old_size block_size block_count free_blocks used_blocks padding_blocks target_blocks target_bytes new_size actual_new_size freed_bytes free_bytes
 
     old_size="$(stat -c%s "$img")"
 
@@ -295,11 +334,28 @@ shrink_filesystem() {
     block_count="$(get_fs_header_value "$img" "^Block count$")"
     free_blocks="$(get_fs_header_value "$img" "^Free blocks$")"
 
-    if [ -z "$block_size" ] || [ -z "$block_count" ]; then
+    if [ -z "$block_size" ] || [ -z "$block_count" ] || [ -z "$free_blocks" ]; then
         die "Failed to read filesystem size after shrink: $img"
     fi
 
+    used_blocks=$((block_count - free_blocks))
+    padding_blocks="$(shrink_padding_blocks "$block_size")"
+    target_blocks=$((used_blocks + padding_blocks))
+
+    if [ "$target_blocks" -gt "$block_count" ]; then
+        target_bytes=$((target_blocks * block_size))
+        echo "Adjusting image to leave about ${DEFAULT_SHRINK_PADDING} free after shrink..."
+        truncate -s "$target_bytes" "$img"
+        sudo resize2fs "$img" "${target_blocks}s" >/dev/null
+        sudo e2fsck -f -y "$img" >/dev/null
+
+        block_size="$(get_fs_header_value "$img" "^Block size$")"
+        block_count="$(get_fs_header_value "$img" "^Block count$")"
+        free_blocks="$(get_fs_header_value "$img" "^Free blocks$")"
+    fi
+
     new_size=$((block_size * block_count))
+    free_bytes=$((free_blocks * block_size))
 
     truncate -s "$new_size" "$img"
     actual_new_size="$(stat -c%s "$img")"
@@ -307,13 +363,16 @@ shrink_filesystem() {
 
     echo "Shrunk: $img"
     echo "Size: $(human_size "$old_size") (${old_size} bytes) -> $(human_size "$actual_new_size") (${actual_new_size} bytes)"
+    echo "Free space left in filesystem: $(human_size "$free_bytes") (target: about ${DEFAULT_SHRINK_PADDING})"
     if [ "$freed_bytes" -gt 0 ]; then
         echo "Freed: $(human_size "$freed_bytes") (${freed_bytes} bytes)"
-    elif [ -n "${free_blocks:-}" ] && [ "$free_blocks" -gt 0 ]; then
-        echo "WARN: filesystem still reports $(human_size $((free_blocks * block_size))) of free space after shrink."
-        echo "WARN: ext4 metadata/layout may currently prevent shrinking the image file any smaller."
-        if prompt_yes_no "Try a slower repack-based shrink fallback?" "yes"; then
-            repack_shrink_filesystem "$img" "$block_size" "$free_blocks" "$old_size"
+    fi
+
+    if [ "$free_bytes" -gt "$(size_to_bytes "$DEFAULT_SHRINK_PADDING")" ]; then
+        echo "WARN: filesystem layout still leaves more free space than the ${DEFAULT_SHRINK_PADDING} target."
+        echo "WARN: a repack can often get the image closer to the requested free-space amount."
+        if prompt_yes_no "Try a slower repack-based shrink fallback to target about ${DEFAULT_SHRINK_PADDING} free?" "yes"; then
+            repack_shrink_filesystem "$img" "$block_size" "$old_size"
         fi
     fi
 }
@@ -330,9 +389,8 @@ prompt_mount_extend_size() {
         return 0
     fi
 
-    read -r -p "Extend filesystem before mounting? [${DEFAULT_EXTEND_SIZE}, 0 to skip]: " answer </dev/tty
-    answer="${answer:-$DEFAULT_EXTEND_SIZE}"
-    printf '%s\n' "$answer"
+    read -r -p "Extend filesystem before mounting? [${DEFAULT_EXTEND_SIZE}, 0 to skip; plain numbers mean MiB]: " answer </dev/tty
+    normalize_extend_size "$answer"
 }
 
 prompt_extend_size() {
@@ -343,9 +401,8 @@ prompt_extend_size() {
         return 0
     fi
 
-    read -r -p "Extend filesystem by how much? [${DEFAULT_EXTEND_SIZE}]: " answer </dev/tty
-    answer="${answer:-$DEFAULT_EXTEND_SIZE}"
-    printf '%s\n' "$answer"
+    read -r -p "Extend filesystem by how much? [${DEFAULT_EXTEND_SIZE}; plain numbers mean MiB]: " answer </dev/tty
+    normalize_extend_size "$answer"
 }
 
 mount_image() {
@@ -463,6 +520,8 @@ extend_image_cmd() {
     target_img="$(prepare_target_image "$1")"
     if [ -z "$size" ]; then
         size="$(prompt_extend_size)"
+    else
+        size="$(normalize_extend_size "$size")"
     fi
     extend_filesystem "$target_img" "$size"
 }
