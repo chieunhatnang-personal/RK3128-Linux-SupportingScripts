@@ -16,7 +16,13 @@ if test -z "${docker_optimizations}"; then setenv docker_optimizations on; fi
 if test -z "${mtdparts}"; then setenv mtdparts rk29xxnand:0x00002000@0x00002000(uboot),0x00002000@0x00004000(trust),0x00010000@0x00006000(boot),-@0x00016000(root); fi
 if test -z "${overlay_prefix}"; then setenv overlay_prefix rk3128; fi
 if test -z "${partnum}"; then setenv partnum 1; fi
-if test -z "${rootpartname}"; then setenv nandrootpartname root; fi
+if test -z "${nandrootpartname}"; then
+    if test -n "${rootpartname}"; then
+        setenv nandrootpartname "${rootpartname}"
+    else
+        setenv nandrootpartname root
+    fi
+fi
 
 # If gpio3 pin 25 is 0, reset into MASKROM
 if gpio input D25; then
@@ -35,35 +41,51 @@ if test -e ${devtype} ${bootpart} ${prefix}armbianEnv.txt; then
     env import -t ${load_addr} ${filesize}
 fi
 
+# Linux block device numbering is probe-order dependent, so use PARTUUID when
+# U-Boot can provide one for the current boot partition.
+setenv partuuid
+if test "${devtype}" = "mmc"; then
+    part uuid mmc ${devnum}:${partnum} partuuid
+fi
+if test "${devtype}" = "usb"; then
+    part uuid usb ${devnum}:${partnum} partuuid
+fi
+
 # Root device auto detection (only if not defined in armbianEnv.txt)
 if test -z "${rootdev}"; then
 
     if test "${devtype}" = "mmc"; then
-        echo "Detected MMC boot (device ${devnum})"
-        setenv rootdev "/dev/mmcblk${devnum}p${partnum}"
+        if test -n "${partuuid}"; then
+            echo "Detected MMC boot (device ${devnum}), using PARTUUID ${partuuid}"
+            setenv rootdev "PARTUUID=${partuuid}"
+        else
+            echo "Detected MMC boot (device ${devnum}), PARTUUID unavailable"
+            setenv rootdev "/dev/mmcblk${devnum}p${partnum}"
+        fi
     fi
 
     if test "${devtype}" = "usb"; then
-        echo "Detected USB boot"
-        setenv rootdev "/dev/sda${partnum}"
+        if test -n "${partuuid}"; then
+            echo "Detected USB boot, using PARTUUID ${partuuid}"
+            setenv rootdev "PARTUUID=${partuuid}"
+        else
+            echo "Detected USB boot, PARTUUID unavailable"
+            setenv rootdev "/dev/sda${partnum}"
+        fi
     fi
 
     if test "${devtype}" = "rknand"; then
         echo "Detected NAND boot"
-        setenv rootdev "/dev/rknand_${rootpartname}"
+        setenv rootdev "/dev/rknand_${nandrootpartname}"
     fi
 
 fi
 
 echo "[DEBUG] ========= NAND root partition name: ${nandrootpartname}"
 echo "[DEBUG] ========= Root device: ${rootdev}"
+echo "[DEBUG] ========= Boot partition UUID: ${partuuid}"
 
 if test "${logo}" = "disabled"; then setenv logo "logo.nologo"; fi
-
-# get PARTUUID if booted from MMC
-if test "${devtype}" = "mmc"; then
-    part uuid mmc ${devnum}:${partnum} partuuid
-fi
 
 if test "${bootlogo}" = "true"; then
     setenv consoleargs "bootsplash.bootfile=bootsplash.armbian ${consoleargs}"
