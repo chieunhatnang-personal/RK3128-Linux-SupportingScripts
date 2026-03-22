@@ -24,13 +24,6 @@ if test -z "${nandrootpartname}"; then
     fi
 fi
 
-# If gpio3 pin 25 is 0, reset into MASKROM
-if gpio input D25; then
-    echo "Resetting into MASKROM mode..."
-    mw.l 0x110005c8 0xEF08A53C 1
-    reset
-fi
-
 echo "[DEBUG] ========= Boot script loaded from ${devtype} ${devnum}"
 setenv bootpart "${devnum}:${partnum}"
 echo "[DEBUG] ========= Boot files will be loaded from ${devtype} ${bootpart}"
