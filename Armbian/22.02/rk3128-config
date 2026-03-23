@@ -4,7 +4,11 @@ set -euo pipefail
 
 ARMBIAN_ENV_TXT="/boot/armbianEnv.txt"
 DEVICE_TREE_OVERLAY_PATH="/boot/dtb/overlay"
-MODULES_LOAD_CONF="/etc/modules-load.d/rk3128-wifi.conf"
+WIFI_STATE_CONF="/etc/default/rk3128-wifi"
+WIFI_LOADER_SERVICE="/etc/systemd/system/rk3128-wifi-loader.service"
+WIFI_LOADER_WANTS_DIR="/etc/systemd/system/network-pre.target.wants"
+WIFI_LOADER_SCRIPT="/usr/local/sbin/rk3128-wifi-loader"
+LEGACY_MODULES_LOAD_CONF="/etc/modules-load.d/rk3128-wifi.conf"
 BLACKLIST_MODPROBE_CONF="/etc/modprobe.d/blacklist-rk3128-wifi.conf"
 CPU_MAX_FREQ_PATH="/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq"
 CPU_GOVERNOR_PATH="/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
@@ -133,6 +137,128 @@ MAX_SPEED=${max_speed}
 GOVERNOR=${governor}
 EOF
     mv "${temp_file}" "${CPUFREQUTILS_CONF}"
+}
+
+get_kv_file_value() {
+    local file_path="$1"
+    local key="$2"
+
+    [ -r "${file_path}" ] || return 1
+    awk -F= -v key="${key}" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "${file_path}"
+}
+
+get_wifi_state_value() {
+    local key="$1"
+    get_kv_file_value "${WIFI_STATE_CONF}" "${key}"
+}
+
+write_wifi_state() {
+    local wifi_key="$1"
+    local wifi_module="$2"
+    local temp_file
+
+    mkdir -p "$(dirname "${WIFI_STATE_CONF}")"
+    temp_file="$(mktemp)"
+
+    cat > "${temp_file}" <<EOF
+WIFI_KEY=${wifi_key}
+WIFI_MODULE=${wifi_module}
+EOF
+
+    mv "${temp_file}" "${WIFI_STATE_CONF}"
+}
+
+install_wifi_loader() {
+    local temp_file
+    local service_name
+
+    mkdir -p "$(dirname "${WIFI_LOADER_SCRIPT}")"
+    temp_file="$(mktemp)"
+    cat > "${temp_file}" <<'EOF'
+#!/bin/sh
+
+set -eu
+
+STATE_CONF="/etc/default/rk3128-wifi"
+WAIT_RETRIES=12
+LOAD_RETRIES=8
+
+read_state_value() {
+    key="$1"
+    awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "${STATE_CONF}"
+}
+
+have_glob_match() {
+    pattern="$1"
+    set -- $pattern
+    [ -e "$1" ]
+}
+
+wait_for_wifi_platform() {
+    tries=0
+
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=10 >/dev/null 2>&1 || true
+    fi
+
+    while [ "${tries}" -lt "${WAIT_RETRIES}" ]; do
+        if [ -r /sys/class/rkwifi/chip ] || have_glob_match "/sys/bus/sdio/devices/*"; then
+            return 0
+        fi
+
+        sleep 1
+        tries=$((tries + 1))
+    done
+
+    return 0
+}
+
+if [ ! -r "${STATE_CONF}" ]; then
+    exit 0
+fi
+
+wifi_module="$(read_state_value WIFI_MODULE)"
+[ -n "${wifi_module}" ] || exit 0
+
+wait_for_wifi_platform
+
+tries=0
+while [ "${tries}" -lt "${LOAD_RETRIES}" ]; do
+    if modprobe "${wifi_module}" >/dev/null 2>&1; then
+        exit 0
+    fi
+
+    sleep 1
+    tries=$((tries + 1))
+done
+
+exec modprobe "${wifi_module}"
+EOF
+    mv "${temp_file}" "${WIFI_LOADER_SCRIPT}"
+    chmod 0755 "${WIFI_LOADER_SCRIPT}"
+
+    mkdir -p "$(dirname "${WIFI_LOADER_SERVICE}")"
+    temp_file="$(mktemp)"
+    cat > "${temp_file}" <<EOF
+[Unit]
+Description=Load the selected RK3128 Wi-Fi driver
+ConditionPathExists=${WIFI_STATE_CONF}
+After=systemd-modules-load.service systemd-udev-settle.service
+Wants=network-pre.target systemd-udev-settle.service
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=${WIFI_LOADER_SCRIPT}
+
+[Install]
+WantedBy=network-pre.target
+EOF
+    mv "${temp_file}" "${WIFI_LOADER_SERVICE}"
+
+    service_name="$(basename "${WIFI_LOADER_SERVICE}")"
+    mkdir -p "${WIFI_LOADER_WANTS_DIR}"
+    ln -sf "${WIFI_LOADER_SERVICE}" "${WIFI_LOADER_WANTS_DIR}/${service_name}"
 }
 
 dialog_menu() {
@@ -418,12 +544,12 @@ apply_wifi_choice() {
     set_env_value "overlays" "${overlays_to_write[*]:-}"
 
     preferred_module="$(resolve_wifi_module "${wifi_key}")"
+    rm -f "${LEGACY_MODULES_LOAD_CONF}"
     if [ -n "${preferred_module}" ]; then
-        create_backup_once
-        mkdir -p "$(dirname "${MODULES_LOAD_CONF}")"
-        printf '%s\n' "${preferred_module}" > "${MODULES_LOAD_CONF}"
+        write_wifi_state "${wifi_key}" "${preferred_module}"
+        install_wifi_loader
     else
-        rm -f "${MODULES_LOAD_CONF}"
+        rm -f "${WIFI_STATE_CONF}"
     fi
     write_wifi_blacklist "${wifi_key}" "${preferred_module}"
 
@@ -435,7 +561,7 @@ apply_wifi_choice() {
     fi
     if [ -n "${preferred_module}" ]; then
         message="${message}\nDriver Module on Next Boot: ${preferred_module}"
-        message="${message}\nModule will be loaded by ${MODULES_LOAD_CONF} after restart, once the DT overlay is active."
+        message="${message}\nDriver will be loaded by ${WIFI_LOADER_SERVICE} using ${WIFI_STATE_CONF} after restart."
         message="${message}\nOther supported onboard Wi-Fi drivers are blacklisted in ${BLACKLIST_MODPROBE_CONF}."
     elif [ "${wifi_key}" = "disabled" ]; then
         message="${message}\nDriver Module: none forced"
@@ -677,7 +803,10 @@ current_wifi_label() {
 
     overlays="$(read_overlays)"
     module=""
-    [ -f "${MODULES_LOAD_CONF}" ] && module="$(head -n 1 "${MODULES_LOAD_CONF}" 2>/dev/null || true)"
+    module="$(get_wifi_state_value WIFI_MODULE 2>/dev/null || true)"
+    if [ -z "${module}" ] && [ -f "${LEGACY_MODULES_LOAD_CONF}" ]; then
+        module="$(head -n 1 "${LEGACY_MODULES_LOAD_CONF}" 2>/dev/null || true)"
+    fi
 
     for key in esp8089 ssv6051 rtl8189; do
         for candidate in ${WIFI_OVERLAY_CANDIDATES[$key]}; do
@@ -913,7 +1042,7 @@ Other Wi-Fi
 
 Disable
   Overlay Candidates: none
-  Driver Handling   : remove ${MODULES_LOAD_CONF}
+  Driver Handling   : remove ${WIFI_STATE_CONF}
   Blacklist File    : ${BLACKLIST_MODPROBE_CONF}
 
 UART Selections
@@ -970,8 +1099,10 @@ Notes
 - SD Card selection updates /boot/armbianEnv.txt overlays=
 - USB OTG selection updates /boot/armbianEnv.txt overlays=
 - Display selection updates /boot/armbianEnv.txt extraargs=
-- The script writes ${MODULES_LOAD_CONF} to load the selected Wi-Fi module on boot
+- The script writes ${WIFI_STATE_CONF} with the selected Wi-Fi driver
+- The script installs ${WIFI_LOADER_SERVICE} to load the selected Wi-Fi driver later in boot
 - The script writes ${BLACKLIST_MODPROBE_CONF} to block unsupported onboard Wi-Fi drivers
+- Legacy ${LEGACY_MODULES_LOAD_CONF} is removed to avoid early boot module loading
 - Wi-Fi modules are not modprobed immediately because the new DT overlay is only active after reboot
 - CPU options are applied immediately through sysfs
 - CPU changes also update ${CPUFREQUTILS_CONF}
