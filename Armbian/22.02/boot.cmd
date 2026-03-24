@@ -6,6 +6,13 @@
 setenv ramdisk_addr_r 0x64000000
 setenv load_addr 0x600f0000
 setenv overlay_error false
+setenv bootargs
+setenv consoleargs
+setenv dockerargs
+setenv partuuid
+setenv rootdev
+setenv rootpartname
+setenv nandrootpartname
 
 # Default values (only if not set by armbianEnv.txt)
 if test -z "${verbosity}"; then setenv verbosity 1; fi
@@ -13,16 +20,9 @@ if test -z "${console}"; then setenv console ttyS1,115200; fi
 if test -z "${bootlogo}"; then setenv bootlogo false; fi
 if test -z "${rootfstype}"; then setenv rootfstype ext4; fi
 if test -z "${docker_optimizations}"; then setenv docker_optimizations on; fi
-if test -z "${mtdparts}"; then setenv mtdparts rk29xxnand:0x00002000@0x00002000(uboot),0x00002000@0x00004000(trust),0x00010000@0x00006000(boot),-@0x00016000(root); fi
+if test -z "${mtdparts}"; then setenv mtdparts rk29xxnand:0x00002000@0x00002000(uboot),0x00002000@0x00004000(trust),-@0x0006000(root); fi
 if test -z "${overlay_prefix}"; then setenv overlay_prefix rk3128; fi
 if test -z "${partnum}"; then setenv partnum 1; fi
-if test -z "${nandrootpartname}"; then
-    if test -n "${rootpartname}"; then
-        setenv nandrootpartname "${rootpartname}"
-    else
-        setenv nandrootpartname root
-    fi
-fi
 
 echo "[DEBUG] ========= Boot script loaded from ${devtype} ${devnum}"
 setenv bootpart "${devnum}:${partnum}"
@@ -31,12 +31,19 @@ echo "[DEBUG] ========= Boot files will be loaded from ${devtype} ${bootpart}"
 # Load armbianEnv.txt if present
 if test -e ${devtype} ${bootpart} ${prefix}armbianEnv.txt; then
     load ${devtype} ${bootpart} ${load_addr} ${prefix}armbianEnv.txt
-    env import -t ${load_addr} ${filesize}
+    env import -t -r ${load_addr} ${filesize}
+fi
+
+if test -z "${nandrootpartname}"; then
+    if test -n "${rootpartname}"; then
+        setenv nandrootpartname "${rootpartname}"
+    else
+        setenv nandrootpartname root
+    fi
 fi
 
 # Linux block device numbering is probe-order dependent, so use PARTUUID when
 # U-Boot can provide one for the current boot partition.
-setenv partuuid
 if test "${devtype}" = "mmc"; then
     part uuid mmc ${devnum}:${partnum} partuuid
 fi
@@ -84,11 +91,12 @@ if test "${bootlogo}" = "true"; then
     setenv consoleargs "bootsplash.bootfile=bootsplash.armbian ${consoleargs}"
 fi
 
-setenv bootargs "uart8250,mmio32,0x20064000 earlyprintk  console=${console} loglevel=${verbosity} ignore_loglevel earlycon root=${rootdev} rootwait rw rootfstype=${rootfstype} ${consoleargs} consoleblank=0  ubootpart=${partuuid} usb-storage.quirks=${usbstoragequirks} ${extraargs} ${extraboardargs} mtdparts=${mtdparts}"
-
+setenv dockerargs
 if test "${docker_optimizations}" = "on"; then
-    setenv bootargs "${bootargs} cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1"
+    setenv dockerargs "cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1"
 fi
+
+setenv bootargs "console=${console} loglevel=${verbosity} ignore_loglevel earlycon root=${rootdev} rootwait rw rootfstype=${rootfstype} ${consoleargs} consoleblank=0  ubootpart=${partuuid} usb-storage.quirks=${usbstoragequirks} ${extraargs} ${extraboardargs} mtdparts=${mtdparts} ${dockerargs}"
 
 # Load initrd
 echo "[DEBUG] ========= Loading initrd from: ${devtype} ${bootpart} ${ramdisk_addr_r} ${prefix}uInitrd"
