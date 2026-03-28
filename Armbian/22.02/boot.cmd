@@ -13,6 +13,13 @@ setenv partuuid
 setenv rootdev
 setenv rootpartname
 setenv nandrootpartname
+setenv boot_source unknown
+setenv bootdev_desc
+setenv required_boot_overlay
+setenv blocked_boot_overlay
+setenv filtered_overlays
+setenv required_boot_overlay_seen false
+setenv keep_overlay false
 
 # Default values (only if not set by armbianEnv.txt)
 if test -z "${verbosity}"; then setenv verbosity 1; fi
@@ -34,6 +41,15 @@ if test -e ${devtype} ${bootpart} ${prefix}armbianEnv.txt; then
     env import -t -r ${load_addr} ${filesize}
 fi
 
+# Reset internal scratch variables after importing armbianEnv.txt.
+setenv boot_source unknown
+setenv bootdev_desc "${devtype} ${devnum}"
+setenv required_boot_overlay
+setenv blocked_boot_overlay
+setenv filtered_overlays
+setenv required_boot_overlay_seen false
+setenv keep_overlay false
+
 if test -z "${nandrootpartname}"; then
     if test -n "${rootpartname}"; then
         setenv nandrootpartname "${rootpartname}"
@@ -51,15 +67,107 @@ if test "${devtype}" = "usb"; then
     part uuid usb ${devnum}:${partnum} partuuid
 fi
 
+# Detect the real boot medium so storage/UART overlays can be corrected even if
+# armbianEnv.txt contains stale or conflicting values.
+if test "${devtype}" = "usb"; then
+    setenv boot_source usb
+    setenv bootdev_desc "USB"
+fi
+
+if test "${devtype}" = "rknand"; then
+    setenv boot_source nand
+    setenv bootdev_desc "NAND"
+fi
+
+if test "${devtype}" = "mmc"; then
+    setenv bootdev_desc "MMC device ${devnum}"
+
+    # RK3128 boards wire the first MMC controller as eMMC and the second as SD.
+    if test "${devnum}" = "0"; then
+        setenv boot_source emmc
+        setenv bootdev_desc "eMMC (mmc device ${devnum})"
+    fi
+
+    if test "${devnum}" = "1"; then
+        setenv boot_source sd
+        setenv bootdev_desc "SD card (mmc device ${devnum})"
+    fi
+fi
+
+echo "[DEBUG] ========= Detected boot medium: ${bootdev_desc}"
+
+# Storage boot must override conflicting armbianEnv.txt overlays:
+# - eMMC boot requires emmc-enabled
+# - SD boot requires sdcard-enabled and must not keep UART2's SD-disabling overlay
+# - NAND boot must not keep emmc-enabled
+if test "${boot_source}" = "emmc"; then
+    setenv required_boot_overlay emmc-enabled
+fi
+
+if test "${boot_source}" = "sd"; then
+    setenv required_boot_overlay sdcard-enabled
+    setenv blocked_boot_overlay gpio2-sdcard-disabled
+fi
+
+if test "${boot_source}" = "nand"; then
+    setenv blocked_boot_overlay emmc-enabled
+fi
+
+setenv filtered_overlays
+setenv required_boot_overlay_seen false
+for overlay_file in ${overlays}; do
+    setenv keep_overlay true
+
+    if test -n "${blocked_boot_overlay}"; then
+        if test "${overlay_file}" = "${blocked_boot_overlay}"; then
+            echo "[DEBUG] ========= Removing conflicting overlay ${overlay_prefix}-${overlay_file}.dtbo for ${bootdev_desc} boot"
+            setenv keep_overlay false
+        fi
+    fi
+
+    if test "${keep_overlay}" = "true"; then
+        if test -n "${required_boot_overlay}"; then
+            if test "${overlay_file}" = "${required_boot_overlay}"; then
+                if test "${required_boot_overlay_seen}" = "true"; then
+                    echo "[DEBUG] ========= Removing duplicate overlay ${overlay_prefix}-${overlay_file}.dtbo"
+                    setenv keep_overlay false
+                else
+                    setenv required_boot_overlay_seen true
+                fi
+            fi
+        fi
+    fi
+
+    if test "${keep_overlay}" = "true"; then
+        if test -z "${filtered_overlays}"; then
+            setenv filtered_overlays "${overlay_file}"
+        else
+            setenv filtered_overlays "${filtered_overlays} ${overlay_file}"
+        fi
+    fi
+done
+setenv overlays "${filtered_overlays}"
+
+if test -n "${required_boot_overlay}"; then
+    if test "${required_boot_overlay_seen}" = "false"; then
+        echo "[DEBUG] ========= Forcing overlay ${overlay_prefix}-${required_boot_overlay}.dtbo for ${bootdev_desc} boot"
+        if test -z "${overlays}"; then
+            setenv overlays "${required_boot_overlay}"
+        else
+            setenv overlays "${overlays} ${required_boot_overlay}"
+        fi
+    fi
+fi
+
 # Root device auto detection (only if not defined in armbianEnv.txt)
 if test -z "${rootdev}"; then
 
     if test "${devtype}" = "mmc"; then
         if test -n "${partuuid}"; then
-            echo "Detected MMC boot (device ${devnum}), using PARTUUID ${partuuid}"
+            echo "Detected ${bootdev_desc} boot, using PARTUUID ${partuuid}"
             setenv rootdev "PARTUUID=${partuuid}"
         else
-            echo "Detected MMC boot (device ${devnum}), PARTUUID unavailable"
+            echo "Detected ${bootdev_desc} boot, PARTUUID unavailable"
             setenv rootdev "/dev/mmcblk${devnum}p${partnum}"
         fi
     fi
