@@ -5,7 +5,7 @@ set -euo pipefail
 MOUNT_DIR="/mnt/armbian"
 ROOTFS_IMG="armbian_rootfs.img"
 DEFAULT_EXTEND_SIZE="100M"
-DEFAULT_SHRINK_PADDING="39M"
+DEFAULT_SHRINK_PADDING="30M"
 
 usage() {
     local status="${1:-1}"
@@ -346,7 +346,7 @@ shrink_filesystem() {
         target_bytes=$((target_blocks * block_size))
         echo "Adjusting image to leave about ${DEFAULT_SHRINK_PADDING} free after shrink..."
         truncate -s "$target_bytes" "$img"
-        sudo resize2fs "$img" "${target_blocks}s" >/dev/null
+        sudo resize2fs "$img" "$target_blocks" >/dev/null
         sudo e2fsck -f -y "$img" >/dev/null
 
         block_size="$(get_fs_header_value "$img" "^Block size$")"
@@ -389,7 +389,13 @@ prompt_mount_extend_size() {
         return 0
     fi
 
-    read -r -p "Extend filesystem before mounting? [${DEFAULT_EXTEND_SIZE}, 0 to skip; plain numbers mean MiB]: " answer </dev/tty
+    read -r -p "Extend filesystem before mounting? [Enter to skip, ${DEFAULT_EXTEND_SIZE} or plain numbers mean MiB]: " answer </dev/tty
+
+    if [ -z "${answer//[[:space:]]/}" ]; then
+        printf '0\n'
+        return 0
+    fi
+
     normalize_extend_size "$answer"
 }
 
