@@ -100,23 +100,17 @@ DDR_FREQ_LABELS["disabled"]="Disabled"
 DDR_FREQ_LABELS["dynamic"]="Enable dynamic frequency"
 DDR_FREQ_LABELS["300"]="Static 300 (600 MHz)"
 DDR_FREQ_LABELS["330"]="Static 330 (660 MHz)"
-DDR_FREQ_LABELS["400"]="Static 400 (800 MHz)"
-DDR_FREQ_LABELS["600"]="Static 600 (1200 MHz)"
-DDR_FREQ_LABELS["666"]="Static 666 (1332 MHz)"
-DDR_FREQ_LABELS["700"]="Static 700 (1400 MHz)"
-DDR_FREQ_LABELS["786"]="Static 786 (1572 MHz)"
-DDR_FREQ_LABELS["800"]="Static 800 (1600 MHz)"
+DDR_FREQ_LABELS["396"]="Static 396 (792 MHz)"
+DDR_FREQ_LABELS["456"]="Static 456 (912 MHz)"
+DDR_FREQ_LABELS["528"]="Static 528 (1056 MHz)"
 
 DDR_OVERLAY_CANDIDATES["disabled"]="dmc-disabled"
 DDR_OVERLAY_CANDIDATES["dynamic"]=""
 DDR_OVERLAY_CANDIDATES["300"]="ddr3-300"
 DDR_OVERLAY_CANDIDATES["330"]="ddr3-330"
-DDR_OVERLAY_CANDIDATES["400"]="ddr3-400"
-DDR_OVERLAY_CANDIDATES["600"]="ddr3-600"
-DDR_OVERLAY_CANDIDATES["666"]="ddr3-666"
-DDR_OVERLAY_CANDIDATES["700"]="ddr3-700"
-DDR_OVERLAY_CANDIDATES["786"]="ddr3-786"
-DDR_OVERLAY_CANDIDATES["800"]="ddr3-800"
+DDR_OVERLAY_CANDIDATES["396"]="ddr3-396"
+DDR_OVERLAY_CANDIDATES["456"]="ddr3-456"
+DDR_OVERLAY_CANDIDATES["528"]="ddr3-528"
 
 CHANGED=0
 BACKUP_CREATED=0
@@ -528,7 +522,7 @@ write_overlays_without_ddr() {
 
     for overlay in ${current}; do
         case "${overlay}" in
-            ddr3-528|ddr3-660)
+            ddr3-400|ddr3-600|ddr3-660|ddr3-666|ddr3-700|ddr3-786|ddr3-800)
                 continue
                 ;;
         esac
@@ -1160,12 +1154,9 @@ select_ddr_menu() {
         "dynamic" "${DDR_FREQ_LABELS[dynamic]}" \
         "300" "${DDR_FREQ_LABELS[300]}" \
         "330" "${DDR_FREQ_LABELS[330]}" \
-        "400" "${DDR_FREQ_LABELS[400]}" \
-        "600" "${DDR_FREQ_LABELS[600]}" \
-        "666" "${DDR_FREQ_LABELS[666]}" \
-        "700" "${DDR_FREQ_LABELS[700]}" \
-        "786" "${DDR_FREQ_LABELS[786]}" \
-        "800" "${DDR_FREQ_LABELS[800]}")" || return 1
+        "396" "${DDR_FREQ_LABELS[396]}" \
+        "456" "${DDR_FREQ_LABELS[456]}" \
+        "528" "${DDR_FREQ_LABELS[528]}")" || return 1
 
     apply_ddr_choice "${selection}"
 }
@@ -1351,12 +1342,9 @@ DDR Choices
   Dynamic   -> no DDR overlay
   300       -> ${DDR_OVERLAY_CANDIDATES[300]}
   330       -> ${DDR_OVERLAY_CANDIDATES[330]}
-  400       -> ${DDR_OVERLAY_CANDIDATES[400]}
-  600       -> ${DDR_OVERLAY_CANDIDATES[600]}
-  666       -> ${DDR_OVERLAY_CANDIDATES[666]}
-  700       -> ${DDR_OVERLAY_CANDIDATES[700]}
-  786       -> ${DDR_OVERLAY_CANDIDATES[786]}
-  800       -> ${DDR_OVERLAY_CANDIDATES[800]}
+  396       -> ${DDR_OVERLAY_CANDIDATES[396]}
+  456       -> ${DDR_OVERLAY_CANDIDATES[456]}
+  528       -> ${DDR_OVERLAY_CANDIDATES[528]}
 
 Notes
 -----

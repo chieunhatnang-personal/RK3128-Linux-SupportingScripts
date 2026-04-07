@@ -4,7 +4,7 @@
 d7b94b377806b3b51a5b4ad32af16d0f  ./usr/bin/armbian-upgrade
 9747a2459db10e74883ed9f78edf3eaa  ./usr/bin/rtk_hciattach
 3865648ab027bdc20616f301841084d1  ./usr/sbin/armbian-add-overlay
-61bce05f7ae51fee6d094bb1393a153e  ./usr/sbin/rk3128-config
+1301e2c939e19e1c3daa5a1c81ce5966  ./usr/sbin/rk3128-config
 5b77f13aeca3322a40f95408a1032c12  ./usr/sbin/ddbr
 e54699a4917c59d1772de22adda12503  ./usr/share/armbian/boot.cmd
 e8cb2bee01c9471c1cf244672842a6f8  ./usr/share/armbian/armbianEnv.txt
