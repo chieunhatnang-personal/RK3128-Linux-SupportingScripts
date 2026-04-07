@@ -3,7 +3,7 @@ Generated with Armbian(tm) build framework https://github.com/armbian/build
 ---------------------------------------------------------------------------
 Vendor:         Armbian
 Revision:       26.2.1
-Board:          Rk322x-box
+Board:          RK3128 TV Box
 Kernel:         Linux  (current)
 Build date:     21.02.2026
 Sources:        https://github.com/armbian/build

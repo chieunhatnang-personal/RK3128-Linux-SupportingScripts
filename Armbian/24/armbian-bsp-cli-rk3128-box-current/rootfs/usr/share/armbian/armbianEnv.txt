@@ -1,3 +1,7 @@
 verbosity=1
-extraargs=coherent_pool=2M
+extraargs=coherent_pool=2M console=tty1
 bootlogo=false
+overlay_prefix=rk3128
+overlays=usb-otg-host dmc-disabled uart1
+fdtfile=rk3128-linux.dtb
+rootfstype=ext4

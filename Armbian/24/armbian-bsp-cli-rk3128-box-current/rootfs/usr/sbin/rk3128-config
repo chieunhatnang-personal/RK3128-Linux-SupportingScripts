@@ -1,0 +1,1451 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ARMBIAN_ENV_TXT="/boot/armbianEnv.txt"
+DEVICE_TREE_OVERLAY_PATH="/boot/dtb/overlay"
+WIFI_STATE_CONF="/etc/default/rk3128-wifi"
+WIFI_LOADER_SERVICE="/etc/systemd/system/wifi-driver-loader.service"
+WIFI_LOADER_WANTS_DIR="/etc/systemd/system/network-pre.target.wants"
+WIFI_LOADER_SCRIPT="/usr/local/sbin/wifi-driver-loader"
+LEGACY_WIFI_LOADER_SERVICE="/etc/systemd/system/rk3128-wifi-loader.service"
+LEGACY_WIFI_LOADER_SCRIPT="/usr/local/sbin/rk3128-wifi-loader"
+LEGACY_MODULES_LOAD_CONF="/etc/modules-load.d/rk3128-wifi.conf"
+BLACKLIST_MODPROBE_CONF="/etc/modprobe.d/blacklist-rk3128-wifi.conf"
+CPU_MAX_FREQ_PATH="/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq"
+CPU_GOVERNOR_PATH="/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+CPUFREQUTILS_CONF="/etc/default/cpufrequtils"
+CPU_MIN_FREQ_VALUE="216000"
+BACKTITLE="Armbian RK3128 board configuration | chieunhatnang.de"
+TITLE="RK3128 Configuration"
+MENU_TITLE="Choose a Setting to Change"
+DIALOG_BIN="${DIALOG_BIN:-dialog}"
+DIALOG_MENU_HEIGHT=22
+DIALOG_MENU_WIDTH=88
+DIALOG_MENU_LIST_HEIGHT=11
+DIALOG_MSG_HEIGHT=12
+DIALOG_MSG_WIDTH=76
+DIALOG_TEXTBOX_HEIGHT=24
+DIALOG_TEXTBOX_WIDTH=88
+
+declare -A WIFI_LABELS
+declare -A WIFI_MODULE_CANDIDATES
+declare -A WIFI_OVERLAY_CANDIDATES
+declare -A UART_LABELS
+declare -A UART_OVERLAY_CANDIDATES
+declare -A SDCARD_LABELS
+declare -A OTG_LABELS
+declare -A OTG_OVERLAY_CANDIDATES
+declare -A DISPLAY_MODES
+declare -A CPU_FREQ_VALUES
+declare -A CPU_GOVERNOR_LABELS
+declare -A DDR_FREQ_LABELS
+declare -A DDR_OVERLAY_CANDIDATES
+
+WIFI_LABELS["esp8089"]="ESP8089"
+WIFI_LABELS["ssv6051"]="SSV6051"
+WIFI_LABELS["rtl8189es"]="Realtek RTL8189ES/ETV"
+WIFI_LABELS["rtl8189fs"]="Realtek RTL8189FS/FTV"
+WIFI_LABELS["other"]="Other Wi-Fi"
+WIFI_LABELS["disabled"]="Disable"
+
+WIFI_MODULE_CANDIDATES["esp8089"]="esp8089"
+WIFI_MODULE_CANDIDATES["ssv6051"]="ssv6051 ssv6x5x"
+WIFI_MODULE_CANDIDATES["rtl8189es"]="8189es 8189etv"
+WIFI_MODULE_CANDIDATES["rtl8189fs"]="8189fs"
+WIFI_MODULE_CANDIDATES["other"]=""
+WIFI_MODULE_CANDIDATES["disabled"]=""
+
+WIFI_OVERLAY_CANDIDATES["esp8089"]="wlan-esp8089"
+WIFI_OVERLAY_CANDIDATES["ssv6051"]="wlan-ssv6051 wlan-ssv6051p wlan-ssv6x5x"
+WIFI_OVERLAY_CANDIDATES["rtl8189es"]="wlan-rtl8189es wlan-8189es wlan-rtl8189etv wlan-8189etv"
+WIFI_OVERLAY_CANDIDATES["rtl8189fs"]="wlan-rtl8189fs wlan-8189fs wlan-rtl8189ftv wlan-8189ftv"
+WIFI_OVERLAY_CANDIDATES["other"]=""
+WIFI_OVERLAY_CANDIDATES["disabled"]=""
+
+UART_LABELS["uart1"]="UART1"
+UART_LABELS["uart2"]="UART2"
+UART_LABELS["disabled"]="Disabled"
+
+UART_OVERLAY_CANDIDATES["uart1"]="uart1"
+UART_OVERLAY_CANDIDATES["uart2"]="gpio2-sdcard-disabled"
+UART_OVERLAY_CANDIDATES["disabled"]=""
+
+SDCARD_LABELS["enabled"]="Enabled"
+SDCARD_LABELS["disabled"]="Disabled"
+SDCARD_ENABLE_OVERLAY="sdcard-enabled"
+
+OTG_LABELS["host"]="Host"
+OTG_LABELS["peripheral"]="Peripheral"
+
+OTG_OVERLAY_CANDIDATES["host"]="usb-otg-host"
+OTG_OVERLAY_CANDIDATES["peripheral"]="usb-otg-peripheral"
+
+DISPLAY_MODES["1080p"]="video=HDMI-A-1:1920x1080@60e"
+DISPLAY_MODES["720p"]="video=HDMI-A-1:1280x720@60e"
+DISPLAY_MODES["1024x768"]="video=HDMI-A-1:1024x768@60e"
+
+CPU_FREQ_VALUES["816"]="816000"
+CPU_FREQ_VALUES["1008"]="1008000"
+CPU_FREQ_VALUES["1200"]="1200000"
+
+CPU_GOVERNOR_LABELS["powersave"]="powersave"
+CPU_GOVERNOR_LABELS["conservative"]="conservative"
+CPU_GOVERNOR_LABELS["ondemand"]="ondemand"
+CPU_GOVERNOR_LABELS["interactive"]="interactive"
+CPU_GOVERNOR_LABELS["userspace"]="userspace"
+CPU_GOVERNOR_LABELS["performance"]="performance"
+
+DDR_FREQ_LABELS["disabled"]="Disabled"
+DDR_FREQ_LABELS["dynamic"]="Enable dynamic frequency"
+DDR_FREQ_LABELS["300"]="Static 300 (600 MHz)"
+DDR_FREQ_LABELS["330"]="Static 330 (660 MHz)"
+DDR_FREQ_LABELS["400"]="Static 400 (800 MHz)"
+DDR_FREQ_LABELS["600"]="Static 600 (1200 MHz)"
+DDR_FREQ_LABELS["666"]="Static 666 (1332 MHz)"
+DDR_FREQ_LABELS["700"]="Static 700 (1400 MHz)"
+DDR_FREQ_LABELS["786"]="Static 786 (1572 MHz)"
+DDR_FREQ_LABELS["800"]="Static 800 (1600 MHz)"
+
+DDR_OVERLAY_CANDIDATES["disabled"]="dmc-disabled"
+DDR_OVERLAY_CANDIDATES["dynamic"]=""
+DDR_OVERLAY_CANDIDATES["300"]="ddr3-300"
+DDR_OVERLAY_CANDIDATES["330"]="ddr3-330"
+DDR_OVERLAY_CANDIDATES["400"]="ddr3-400"
+DDR_OVERLAY_CANDIDATES["600"]="ddr3-600"
+DDR_OVERLAY_CANDIDATES["666"]="ddr3-666"
+DDR_OVERLAY_CANDIDATES["700"]="ddr3-700"
+DDR_OVERLAY_CANDIDATES["786"]="ddr3-786"
+DDR_OVERLAY_CANDIDATES["800"]="ddr3-800"
+
+CHANGED=0
+BACKUP_CREATED=0
+TEMP_FILE=""
+
+cleanup() {
+    if [ -n "${TEMP_FILE}" ] && [ -f "${TEMP_FILE}" ]; then
+        rm -f "${TEMP_FILE}"
+    fi
+}
+
+trap cleanup EXIT
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || die "Please run this script as root."
+}
+
+need_dialog() {
+    command -v "${DIALOG_BIN}" >/dev/null 2>&1 || die "dialog is required."
+}
+
+need_armbian_env() {
+    [ -f "${ARMBIAN_ENV_TXT}" ] || die "Missing ${ARMBIAN_ENV_TXT}"
+}
+
+need_cpu_sysfs() {
+    [ -w "${CPU_MAX_FREQ_PATH}" ] || die "Missing or unwritable ${CPU_MAX_FREQ_PATH}"
+    [ -w "${CPU_GOVERNOR_PATH}" ] || die "Missing or unwritable ${CPU_GOVERNOR_PATH}"
+}
+
+read_cpufrequtils_value() {
+    local key="$1"
+
+    if [ -r "${CPUFREQUTILS_CONF}" ]; then
+        awk -F= -v key="${key}" '$1 == key {print $2; exit}' "${CPUFREQUTILS_CONF}"
+    fi
+}
+
+write_cpufrequtils() {
+    local max_speed="$1"
+    local governor="$2"
+    local temp_file
+
+    temp_file="$(mktemp)"
+    cat > "${temp_file}" <<EOF
+ENABLE=true
+MIN_SPEED=${CPU_MIN_FREQ_VALUE}
+MAX_SPEED=${max_speed}
+GOVERNOR=${governor}
+EOF
+    mv "${temp_file}" "${CPUFREQUTILS_CONF}"
+}
+
+get_kv_file_value() {
+    local file_path="$1"
+    local key="$2"
+
+    [ -r "${file_path}" ] || return 1
+    awk -F= -v key="${key}" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "${file_path}"
+}
+
+get_wifi_state_value() {
+    local key="$1"
+    get_kv_file_value "${WIFI_STATE_CONF}" "${key}"
+}
+
+write_wifi_state() {
+    local wifi_key="$1"
+    local wifi_module="$2"
+    local temp_file
+
+    mkdir -p "$(dirname "${WIFI_STATE_CONF}")"
+    temp_file="$(mktemp)"
+
+    cat > "${temp_file}" <<EOF
+WIFI_KEY=${wifi_key}
+WIFI_MODULE=${wifi_module}
+EOF
+
+    mv "${temp_file}" "${WIFI_STATE_CONF}"
+}
+
+install_wifi_loader() {
+    local temp_file
+    local service_name
+    local legacy_service_name
+
+    mkdir -p "$(dirname "${WIFI_LOADER_SCRIPT}")"
+    temp_file="$(mktemp)"
+    cat > "${temp_file}" <<'EOF'
+#!/bin/sh
+
+set -eu
+
+STATE_CONF="/etc/default/rk3128-wifi"
+WAIT_RETRIES=12
+LOAD_RETRIES=8
+
+read_state_value() {
+    key="$1"
+    awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "${STATE_CONF}"
+}
+
+have_glob_match() {
+    pattern="$1"
+    set -- $pattern
+    [ -e "$1" ]
+}
+
+wait_for_wifi_platform() {
+    tries=0
+
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=10 >/dev/null 2>&1 || true
+    fi
+
+    while [ "${tries}" -lt "${WAIT_RETRIES}" ]; do
+        if [ -r /sys/class/rkwifi/chip ] || have_glob_match "/sys/bus/sdio/devices/*"; then
+            return 0
+        fi
+
+        sleep 1
+        tries=$((tries + 1))
+    done
+
+    return 0
+}
+
+if [ ! -r "${STATE_CONF}" ]; then
+    exit 0
+fi
+
+wifi_module="$(read_state_value WIFI_MODULE)"
+[ -n "${wifi_module}" ] || exit 0
+
+wait_for_wifi_platform
+
+tries=0
+while [ "${tries}" -lt "${LOAD_RETRIES}" ]; do
+    if modprobe "${wifi_module}" >/dev/null 2>&1; then
+        exit 0
+    fi
+
+    sleep 1
+    tries=$((tries + 1))
+done
+
+exec modprobe "${wifi_module}"
+EOF
+    mv "${temp_file}" "${WIFI_LOADER_SCRIPT}"
+    chmod 0755 "${WIFI_LOADER_SCRIPT}"
+
+    mkdir -p "$(dirname "${WIFI_LOADER_SERVICE}")"
+    temp_file="$(mktemp)"
+    cat > "${temp_file}" <<EOF
+[Unit]
+Description=Load the selected RK3128 Wi-Fi driver
+ConditionPathExists=${WIFI_STATE_CONF}
+After=systemd-modules-load.service systemd-udev-settle.service
+Wants=network-pre.target systemd-udev-settle.service
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=${WIFI_LOADER_SCRIPT}
+
+[Install]
+WantedBy=network-pre.target
+EOF
+    mv "${temp_file}" "${WIFI_LOADER_SERVICE}"
+
+    service_name="$(basename "${WIFI_LOADER_SERVICE}")"
+    legacy_service_name="$(basename "${LEGACY_WIFI_LOADER_SERVICE}")"
+    mkdir -p "${WIFI_LOADER_WANTS_DIR}"
+    ln -sf "${WIFI_LOADER_SERVICE}" "${WIFI_LOADER_WANTS_DIR}/${service_name}"
+    rm -f "${LEGACY_WIFI_LOADER_SCRIPT}" "${LEGACY_WIFI_LOADER_SERVICE}" \
+        "${WIFI_LOADER_WANTS_DIR}/${legacy_service_name}"
+}
+
+dialog_menu() {
+    local prompt="$1"
+    shift
+    "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
+        --cr-wrap --no-collapse \
+        --menu "${prompt}" "${DIALOG_MENU_HEIGHT}" "${DIALOG_MENU_WIDTH}" "${DIALOG_MENU_LIST_HEIGHT}" "$@" 2>&1 >/dev/tty
+}
+
+dialog_msg() {
+    "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
+        --cr-wrap --no-collapse \
+        --msgbox "$1" "${DIALOG_MSG_HEIGHT}" "${DIALOG_MSG_WIDTH}"
+}
+
+dialog_yesno() {
+    "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
+        --cr-wrap --no-collapse \
+        --yesno "$1" "${DIALOG_MSG_HEIGHT}" "${DIALOG_MSG_WIDTH}"
+}
+
+dialog_textbox_from_string() {
+    local content="$1"
+    local tmp
+
+    tmp="$(mktemp)"
+    printf '%s\n' "${content}" > "${tmp}"
+    "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
+        --textbox "${tmp}" "${DIALOG_TEXTBOX_HEIGHT}" "${DIALOG_TEXTBOX_WIDTH}"
+    rm -f "${tmp}"
+}
+
+trim_spaces() {
+    awk '{$1=$1; print}'
+}
+
+create_backup_once() {
+    if [ "${BACKUP_CREATED}" -eq 0 ]; then
+        cp -f "${ARMBIAN_ENV_TXT}" "${ARMBIAN_ENV_TXT}.bak"
+        BACKUP_CREATED=1
+    fi
+}
+
+get_env_value() {
+    local key="$1"
+    awk -F= -v key="${key}" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "${ARMBIAN_ENV_TXT}"
+}
+
+set_env_value() {
+    local key="$1"
+    local value="$2"
+
+    create_backup_once
+    TEMP_FILE="$(mktemp)"
+
+    awk -F= -v key="${key}" -v value="${value}" '
+        BEGIN { updated = 0 }
+        $1 == key {
+            print key "=" value
+            updated = 1
+            next
+        }
+        { print }
+        END {
+            if (!updated) {
+                print key "=" value
+            }
+        }
+    ' "${ARMBIAN_ENV_TXT}" > "${TEMP_FILE}"
+
+    mv "${TEMP_FILE}" "${ARMBIAN_ENV_TXT}"
+    TEMP_FILE=""
+    CHANGED=1
+}
+
+overlay_exists() {
+    local overlay="$1"
+    [ -n "${overlay}" ] && [ -f "${DEVICE_TREE_OVERLAY_PATH}/${overlay_prefix:-rk3128}-${overlay}.dtbo" ]
+}
+
+is_known_wifi_overlay() {
+    local overlay="$1"
+    local key candidate
+
+    for key in "${!WIFI_OVERLAY_CANDIDATES[@]}"; do
+        for candidate in ${WIFI_OVERLAY_CANDIDATES[$key]}; do
+            [ "${overlay}" = "${candidate}" ] && return 0
+        done
+    done
+
+    return 1
+}
+
+is_known_otg_overlay() {
+    local overlay="$1"
+    local key
+
+    for key in "${!OTG_OVERLAY_CANDIDATES[@]}"; do
+        [ "${overlay}" = "${OTG_OVERLAY_CANDIDATES[$key]}" ] && return 0
+    done
+
+    return 1
+}
+
+is_known_uart_overlay() {
+    local overlay="$1"
+    local key
+
+    for key in "${!UART_OVERLAY_CANDIDATES[@]}"; do
+        [ "${overlay}" = "${UART_OVERLAY_CANDIDATES[$key]}" ] && return 0
+    done
+
+    return 1
+}
+
+is_sdcard_overlay() {
+    local overlay="$1"
+    [ "${overlay}" = "${SDCARD_ENABLE_OVERLAY}" ]
+}
+
+is_known_ddr_overlay() {
+    local overlay="$1"
+    local key
+
+    for key in "${!DDR_OVERLAY_CANDIDATES[@]}"; do
+        [ -n "${DDR_OVERLAY_CANDIDATES[$key]}" ] && [ "${overlay}" = "${DDR_OVERLAY_CANDIDATES[$key]}" ] && return 0
+    done
+
+    return 1
+}
+
+resolve_wifi_overlay() {
+    local wifi_key="$1"
+    local candidate
+
+    for candidate in ${WIFI_OVERLAY_CANDIDATES[$wifi_key]}; do
+        if overlay_exists "${candidate}"; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+resolve_wifi_module() {
+    local wifi_key="$1"
+    local candidate
+
+    for candidate in ${WIFI_MODULE_CANDIDATES[$wifi_key]}; do
+        if modinfo "${candidate}" >/dev/null 2>&1; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    printf '%s\n' "${WIFI_MODULE_CANDIDATES[$wifi_key]%% *}"
+}
+
+read_overlays() {
+    local value
+    value="$(get_env_value overlays)"
+    printf '%s\n' "${value}"
+}
+
+write_overlays_without_wifi() {
+    local current filtered overlay
+    current="$(read_overlays)"
+    filtered=()
+
+    for overlay in ${current}; do
+        if ! is_known_wifi_overlay "${overlay}"; then
+            filtered+=("${overlay}")
+        fi
+    done
+
+    printf '%s\n' "${filtered[*]:-}"
+}
+
+write_overlays_without_uart() {
+    local current filtered overlay
+    current="$(read_overlays)"
+    filtered=()
+
+    for overlay in ${current}; do
+        if ! is_known_uart_overlay "${overlay}"; then
+            filtered+=("${overlay}")
+        fi
+    done
+
+    printf '%s\n' "${filtered[*]:-}"
+}
+
+write_overlays_without_sdcard() {
+    local current filtered overlay
+    current="$(read_overlays)"
+    filtered=()
+
+    for overlay in ${current}; do
+        if ! is_sdcard_overlay "${overlay}"; then
+            filtered+=("${overlay}")
+        fi
+    done
+
+    printf '%s\n' "${filtered[*]:-}"
+}
+
+write_overlays_without_otg() {
+    local current filtered overlay
+    current="$(read_overlays)"
+    filtered=()
+
+    for overlay in ${current}; do
+        if ! is_known_otg_overlay "${overlay}"; then
+            filtered+=("${overlay}")
+        fi
+    done
+
+    printf '%s\n' "${filtered[*]:-}"
+}
+
+write_overlays_without_ddr() {
+    local current filtered overlay
+    current="$(read_overlays)"
+    filtered=()
+
+    for overlay in ${current}; do
+        case "${overlay}" in
+            ddr3-528|ddr3-660)
+                continue
+                ;;
+        esac
+
+        if ! is_known_ddr_overlay "${overlay}"; then
+            filtered+=("${overlay}")
+        fi
+    done
+
+    printf '%s\n' "${filtered[*]:-}"
+}
+
+managed_wifi_modules() {
+    local key candidate
+    local -A seen=()
+
+    for key in esp8089 ssv6051 rtl8189es rtl8189fs; do
+        for candidate in ${WIFI_MODULE_CANDIDATES[$key]}; do
+            if [ -n "${candidate}" ] && [ -z "${seen[$candidate]+x}" ]; then
+                seen["${candidate}"]=1
+                printf '%s\n' "${candidate}"
+            fi
+        done
+    done
+}
+
+write_wifi_blacklist() {
+    local wifi_key="$1"
+    local selected_module="$2"
+    local module temp_file
+
+    if [ "${wifi_key}" = "other" ]; then
+        rm -f "${BLACKLIST_MODPROBE_CONF}"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "${BLACKLIST_MODPROBE_CONF}")"
+    temp_file="$(mktemp)"
+
+    for module in $(managed_wifi_modules); do
+        if [ -n "${selected_module}" ] && [ "${module}" = "${selected_module}" ]; then
+            continue
+        fi
+
+        printf 'blacklist %s\n' "${module}" >> "${temp_file}"
+    done
+
+    if [ -s "${temp_file}" ]; then
+        mv "${temp_file}" "${BLACKLIST_MODPROBE_CONF}"
+    else
+        rm -f "${temp_file}" "${BLACKLIST_MODPROBE_CONF}"
+    fi
+}
+
+wifi_is_fully_blacklisted() {
+    local module
+
+    [ -f "${BLACKLIST_MODPROBE_CONF}" ] || return 1
+
+    for module in $(managed_wifi_modules); do
+        if ! grep -Eq "^[[:space:]]*blacklist[[:space:]]+${module}([[:space:]]|$)" "${BLACKLIST_MODPROBE_CONF}"; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+apply_wifi_choice() {
+    local wifi_key="$1"
+    local current_overlays selected_overlay preferred_module message
+    local -a overlays_to_write=()
+
+    current_overlays="$(write_overlays_without_wifi)"
+    if [ -n "${current_overlays}" ]; then
+        for selected_overlay in ${current_overlays}; do
+            overlays_to_write+=("${selected_overlay}")
+        done
+    fi
+
+    selected_overlay=""
+    if resolve_wifi_overlay "${wifi_key}" >/dev/null 2>&1; then
+        selected_overlay="$(resolve_wifi_overlay "${wifi_key}")"
+        overlays_to_write+=("${selected_overlay}")
+    fi
+
+    set_env_value "overlays" "${overlays_to_write[*]:-}"
+
+    preferred_module="$(resolve_wifi_module "${wifi_key}")"
+    rm -f "${LEGACY_MODULES_LOAD_CONF}"
+    if [ -n "${preferred_module}" ]; then
+        write_wifi_state "${wifi_key}" "${preferred_module}"
+        install_wifi_loader
+    else
+        rm -f "${WIFI_STATE_CONF}"
+    fi
+    write_wifi_blacklist "${wifi_key}" "${preferred_module}"
+
+    message="Wi-Fi set to ${WIFI_LABELS[$wifi_key]}."
+    if [ -n "${selected_overlay}" ]; then
+        message="${message}\nOverlay: ${selected_overlay}"
+    else
+        message="${message}\nOverlay: none"
+    fi
+    if [ -n "${preferred_module}" ]; then
+        message="${message}\nDriver Module on Next Boot: ${preferred_module}"
+        message="${message}\nDriver will be loaded by ${WIFI_LOADER_SERVICE} using ${WIFI_STATE_CONF} after restart."
+        message="${message}\nOther supported onboard Wi-Fi drivers are blacklisted in ${BLACKLIST_MODPROBE_CONF}."
+    elif [ "${wifi_key}" = "disabled" ]; then
+        message="${message}\nDriver Module: none forced"
+        message="${message}\nAll supported onboard Wi-Fi drivers are blacklisted in ${BLACKLIST_MODPROBE_CONF}."
+    else
+        message="${message}\nDriver Module: none forced"
+        message="${message}\nAutomatic driver probing will happen after restart."
+        message="${message}\nNo Wi-Fi blacklist override is active."
+    fi
+
+    dialog_msg "${message}"
+}
+
+apply_uart_choice() {
+    local uart_key="$1"
+    local current_overlays selected_overlay message overlay
+    local -a overlays_to_write=()
+
+    if [ "${uart_key}" = "uart2" ]; then
+        if ! dialog_yesno "Enabling UART2 will disable the SD Card.\n\nContinue?"; then
+            return 1
+        fi
+    fi
+
+    current_overlays="$(read_overlays)"
+    if [ -n "${current_overlays}" ]; then
+        for overlay in ${current_overlays}; do
+            if is_known_uart_overlay "${overlay}"; then
+                continue
+            fi
+            if [ "${uart_key}" = "uart2" ] && is_sdcard_overlay "${overlay}"; then
+                continue
+            fi
+            overlays_to_write+=("${overlay}")
+        done
+    fi
+
+    selected_overlay="${UART_OVERLAY_CANDIDATES[$uart_key]}"
+    if [ -n "${selected_overlay}" ]; then
+        if overlay_exists "${selected_overlay}"; then
+            overlays_to_write+=("${selected_overlay}")
+        else
+            dialog_msg "Missing overlay ${selected_overlay}.\nExpected file:\n${DEVICE_TREE_OVERLAY_PATH}/${overlay_prefix:-rk3128}-${selected_overlay}.dtbo"
+            return 1
+        fi
+    fi
+
+    set_env_value "overlays" "${overlays_to_write[*]:-}"
+
+    message="UART set to ${UART_LABELS[$uart_key]}."
+    if [ -n "${selected_overlay}" ]; then
+        message="${message}\nOverlay: ${selected_overlay}"
+    else
+        message="${message}\nOverlay: none"
+    fi
+    if [ "${uart_key}" = "uart2" ]; then
+        message="${message}\nSD Card: ${SDCARD_LABELS[disabled]}"
+    fi
+    dialog_msg "${message}"
+}
+
+apply_sdcard_choice() {
+    local sdcard_key="$1"
+    local current_overlays selected_overlay message overlay
+    local -a overlays_to_write=()
+
+    if [ "${sdcard_key}" = "enabled" ] && [ "$(current_uart_label)" = "${UART_LABELS[uart2]}" ]; then
+        if ! dialog_yesno "Enabling the SD Card will disable UART2.\n\nContinue?"; then
+            return 1
+        fi
+    fi
+
+    current_overlays="$(read_overlays)"
+    if [ -n "${current_overlays}" ]; then
+        for overlay in ${current_overlays}; do
+            if is_sdcard_overlay "${overlay}"; then
+                continue
+            fi
+            if [ "${sdcard_key}" = "enabled" ] && [ "${overlay}" = "${UART_OVERLAY_CANDIDATES[uart2]}" ]; then
+                continue
+            fi
+            overlays_to_write+=("${overlay}")
+        done
+    fi
+
+    selected_overlay=""
+    if [ "${sdcard_key}" = "enabled" ]; then
+        selected_overlay="${SDCARD_ENABLE_OVERLAY}"
+        if overlay_exists "${selected_overlay}"; then
+            overlays_to_write+=("${selected_overlay}")
+        else
+            dialog_msg "Missing overlay ${selected_overlay}.\nExpected file:\n${DEVICE_TREE_OVERLAY_PATH}/${overlay_prefix:-rk3128}-${selected_overlay}.dtbo"
+            return 1
+        fi
+    fi
+
+    set_env_value "overlays" "${overlays_to_write[*]:-}"
+
+    message="SD Card set to ${SDCARD_LABELS[$sdcard_key]}."
+    if [ -n "${selected_overlay}" ]; then
+        message="${message}\nOverlay: ${selected_overlay}"
+    else
+        message="${message}\nOverlay: none"
+    fi
+    if [ "${sdcard_key}" = "enabled" ]; then
+        message="${message}\nUART2: disabled if it was active."
+    fi
+    dialog_msg "${message}"
+}
+
+apply_otg_choice() {
+    local otg_key="$1"
+    local current_overlays selected_overlay message
+    local -a overlays_to_write=()
+
+    current_overlays="$(write_overlays_without_otg)"
+    if [ -n "${current_overlays}" ]; then
+        for selected_overlay in ${current_overlays}; do
+            overlays_to_write+=("${selected_overlay}")
+        done
+    fi
+
+    selected_overlay="${OTG_OVERLAY_CANDIDATES[$otg_key]}"
+    if overlay_exists "${selected_overlay}"; then
+        overlays_to_write+=("${selected_overlay}")
+    else
+        dialog_msg "Missing overlay ${selected_overlay}.\nExpected file:\n${DEVICE_TREE_OVERLAY_PATH}/${overlay_prefix:-rk3128}-${selected_overlay}.dtbo"
+        return 1
+    fi
+
+    set_env_value "overlays" "${overlays_to_write[*]:-}"
+
+    message="USB OTG Default Mode set to ${OTG_LABELS[$otg_key]}."
+    message="${message}\nOverlay: ${selected_overlay}"
+    dialog_msg "${message}"
+}
+
+clean_extraargs_video() {
+    local value="$1"
+    local token cleaned=()
+
+    for token in ${value}; do
+        case "${token}" in
+            video=HDMI-A-1:*)
+                ;;
+            *)
+                cleaned+=("${token}")
+                ;;
+        esac
+    done
+
+    printf '%s\n' "$(printf '%s ' "${cleaned[@]}" | trim_spaces)"
+}
+
+apply_display_choice() {
+    local display_key="$1"
+    local extraargs cleaned newargs mode
+
+    extraargs="$(get_env_value extraargs)"
+    cleaned="$(clean_extraargs_video "${extraargs}")"
+    mode="${DISPLAY_MODES[$display_key]}"
+
+    if [ -n "${cleaned}" ]; then
+        newargs="${cleaned} ${mode}"
+    else
+        newargs="${mode}"
+    fi
+
+    set_env_value "extraargs" "$(printf '%s\n' "${newargs}" | trim_spaces)"
+    dialog_msg "Display Resolution set to ${display_key}.\nAdded: ${mode}"
+}
+
+read_cpu_max_freq() {
+    cat "${CPU_MAX_FREQ_PATH}" 2>/dev/null || true
+}
+
+read_cpu_governor() {
+    cat "${CPU_GOVERNOR_PATH}" 2>/dev/null || true
+}
+
+read_ddr_cur_freq() {
+    local path
+
+    if [ -r /sys/class/devfreq/dmc/cur_freq ]; then
+        cat /sys/class/devfreq/dmc/cur_freq 2>/dev/null || true
+        return 0
+    fi
+
+    for path in /sys/class/devfreq/*/cur_freq; do
+        [ -r "${path}" ] || continue
+        case "${path}" in
+            *dmc*)
+                cat "${path}" 2>/dev/null || true
+                return 0
+                ;;
+        esac
+    done
+
+    if [ -d /sys/kernel/debug ] && [ ! -r /sys/kernel/debug/clk/clk_summary ]; then
+        mount -t debugfs none /sys/kernel/debug >/dev/null 2>&1 || true
+    fi
+
+    if [ -r /sys/kernel/debug/clk/clk_summary ]; then
+        awk '$1 == "clk_ddrc" { print $4; exit }' /sys/kernel/debug/clk/clk_summary
+    fi
+}
+
+format_khz_as_mhz() {
+    local khz="$1"
+
+    if [ -z "${khz}" ]; then
+        printf '%s\n' "unknown"
+        return 0
+    fi
+
+    awk -v khz="${khz}" 'BEGIN { printf "%.0f MHz", khz / 1000 }'
+}
+
+format_hz_as_ddr_clock() {
+    local hz="$1"
+
+    if [ -z "${hz}" ]; then
+        printf '%s\n' "unknown"
+        return 0
+    fi
+
+    awk -v hz="${hz}" 'BEGIN { printf "%.0f MHz clock (%.0f MT/s)", hz / 1000000, (hz * 2) / 1000000 }'
+}
+
+current_cpu_freq_label() {
+    local current
+
+    current="$(read_cpu_max_freq)"
+    if [ -z "${current}" ]; then
+        printf '%s\n' "unknown"
+    else
+        printf '%s (%s KHz)\n' "$(format_khz_as_mhz "${current}")" "${current}"
+    fi
+}
+
+current_cpu_freq_short_label() {
+    local current
+
+    current="$(read_cpu_max_freq)"
+    if [ -z "${current}" ]; then
+        printf '%s\n' "unknown"
+    else
+        format_khz_as_mhz "${current}"
+        printf '\n'
+    fi
+}
+
+current_cpu_governor_label() {
+    local current
+
+    current="$(read_cpu_governor)"
+    printf '%s\n' "${current:-unknown}"
+}
+
+current_ddr_clock_label() {
+    local current
+
+    current="$(read_ddr_cur_freq)"
+    if [ -z "${current}" ]; then
+        printf '%s\n' "unknown"
+    else
+        printf '%s (%s Hz)\n' "$(format_hz_as_ddr_clock "${current}")" "${current}"
+    fi
+}
+
+current_ddr_clock_short_label() {
+    local current
+
+    current="$(read_ddr_cur_freq)"
+    if [ -z "${current}" ]; then
+        printf '%s\n' "unknown"
+    else
+        format_hz_as_ddr_clock "${current}"
+        printf '\n'
+    fi
+}
+
+format_info_line() {
+    local label="$1"
+    local value="$2"
+    printf '%-10s : %s\n' "${label}" "${value}"
+}
+
+current_status_lines() {
+    cat <<EOF
+$(format_info_line "CPU / Gov" "$(current_cpu_freq_short_label) / $(current_cpu_governor_label)")
+$(format_info_line "DDR" "$(current_ddr_clock_short_label)")
+$(format_info_line "SD / UART" "$(current_sdcard_label) / $(current_uart_label)")
+$(format_info_line "Display" "$(current_display_label)")
+$(format_info_line "OTG / WiFi" "$(current_otg_label) / $(current_wifi_label)")
+EOF
+}
+
+current_status_overview() {
+    cat <<EOF
+Current Status
+--------------
+$(current_status_lines)
+EOF
+}
+
+apply_cpu_freq_choice() {
+    local freq_key="$1"
+    local value="${CPU_FREQ_VALUES[$freq_key]}"
+    local governor
+
+    printf '%s\n' "${value}" > "${CPU_MAX_FREQ_PATH}"
+    governor="$(read_cpu_governor)"
+    governor="${governor:-$(read_cpufrequtils_value GOVERNOR)}"
+    governor="${governor:-ondemand}"
+    write_cpufrequtils "${value}" "${governor}"
+    CHANGED=1
+    dialog_msg "CPU Max Frequency set to ${freq_key} MHz.\nWritten Value: ${value} KHz\nPersistent Config Updated: ${CPUFREQUTILS_CONF}"
+}
+
+apply_cpu_governor_choice() {
+    local governor="$1"
+    local max_speed
+
+    printf '%s\n' "${governor}" > "${CPU_GOVERNOR_PATH}"
+    max_speed="$(read_cpu_max_freq)"
+    max_speed="${max_speed:-$(read_cpufrequtils_value MAX_SPEED)}"
+    max_speed="${max_speed:-${CPU_FREQ_VALUES[1200]}}"
+    write_cpufrequtils "${max_speed}" "${governor}"
+    CHANGED=1
+    dialog_msg "CPU Governor set to ${governor}.\nPersistent Config Updated: ${CPUFREQUTILS_CONF}"
+}
+
+apply_ddr_choice() {
+    local ddr_key="$1"
+    local current_overlays selected_overlay message overlay
+    local -a overlays_to_write=()
+
+    current_overlays="$(write_overlays_without_ddr)"
+    if [ -n "${current_overlays}" ]; then
+        for overlay in ${current_overlays}; do
+            overlays_to_write+=("${overlay}")
+        done
+    fi
+
+    selected_overlay="${DDR_OVERLAY_CANDIDATES[$ddr_key]}"
+    if [ -n "${selected_overlay}" ]; then
+        if overlay_exists "${selected_overlay}"; then
+            overlays_to_write+=("${selected_overlay}")
+        else
+            dialog_msg "Missing overlay ${selected_overlay}.\nExpected file:\n${DEVICE_TREE_OVERLAY_PATH}/${overlay_prefix:-rk3128}-${selected_overlay}.dtbo"
+            return 1
+        fi
+    fi
+
+    set_env_value "overlays" "${overlays_to_write[*]:-}"
+
+    message="Dynamic RAM Freq set to ${DDR_FREQ_LABELS[$ddr_key]}."
+    if [ -n "${selected_overlay}" ]; then
+        message="${message}\nOverlay: ${selected_overlay}"
+    else
+        message="${message}\nOverlay: none"
+    fi
+    message="${message}\nLive DDR Clock: $(current_ddr_clock_label)"
+    message="${message}\nA reboot is required for DDR changes to take effect."
+    dialog_msg "${message}"
+}
+
+current_wifi_label() {
+    local overlays module overlay key candidate
+
+    overlays="$(read_overlays)"
+    module=""
+    module="$(get_wifi_state_value WIFI_MODULE 2>/dev/null || true)"
+    if [ -z "${module}" ] && [ -f "${LEGACY_MODULES_LOAD_CONF}" ]; then
+        module="$(head -n 1 "${LEGACY_MODULES_LOAD_CONF}" 2>/dev/null || true)"
+    fi
+
+    for key in esp8089 ssv6051 rtl8189es rtl8189fs; do
+        for candidate in ${WIFI_OVERLAY_CANDIDATES[$key]}; do
+            for overlay in ${overlays}; do
+                if [ "${overlay}" = "${candidate}" ]; then
+                    printf '%s\n' "${WIFI_LABELS[$key]}"
+                    return 0
+                fi
+            done
+        done
+
+        for candidate in ${WIFI_MODULE_CANDIDATES[$key]}; do
+            if [ -n "${candidate}" ] && [ "${module}" = "${candidate}" ]; then
+                printf '%s\n' "${WIFI_LABELS[$key]}"
+                return 0
+            fi
+        done
+    done
+
+    if wifi_is_fully_blacklisted; then
+        printf '%s\n' "${WIFI_LABELS[disabled]}"
+        return 0
+    fi
+
+    printf '%s\n' "${WIFI_LABELS[other]}"
+}
+
+current_uart_label() {
+    local overlays overlay key
+
+    overlays="$(read_overlays)"
+    for key in uart1 uart2; do
+        for overlay in ${overlays}; do
+            if [ "${overlay}" = "${UART_OVERLAY_CANDIDATES[$key]}" ]; then
+                printf '%s\n' "${UART_LABELS[$key]}"
+                return 0
+            fi
+        done
+    done
+
+    printf '%s\n' "${UART_LABELS[disabled]}"
+}
+
+current_sdcard_label() {
+    local overlays overlay
+
+    overlays="$(read_overlays)"
+    for overlay in ${overlays}; do
+        if [ "${overlay}" = "${UART_OVERLAY_CANDIDATES[uart2]}" ]; then
+            printf '%s\n' "Disabled (UART2 Active)"
+            return 0
+        fi
+    done
+
+    for overlay in ${overlays}; do
+        if is_sdcard_overlay "${overlay}"; then
+            printf '%s\n' "${SDCARD_LABELS[enabled]}"
+            return 0
+        fi
+    done
+
+    printf '%s\n' "${SDCARD_LABELS[disabled]}"
+}
+
+current_otg_label() {
+    local overlays overlay key
+
+    overlays="$(read_overlays)"
+    for key in host peripheral; do
+        for overlay in ${overlays}; do
+            if [ "${overlay}" = "${OTG_OVERLAY_CANDIDATES[$key]}" ]; then
+                printf '%s\n' "${OTG_LABELS[$key]}"
+                return 0
+            fi
+        done
+    done
+
+    printf '%s\n' "Host (boot default)"
+}
+
+current_ddr_mode_label() {
+    local overlays overlay key
+
+    overlays="$(read_overlays)"
+    for key in disabled 300 330 400 600 666 700 786 800; do
+        for overlay in ${overlays}; do
+            if [ -n "${DDR_OVERLAY_CANDIDATES[$key]}" ] && [ "${overlay}" = "${DDR_OVERLAY_CANDIDATES[$key]}" ]; then
+                printf '%s\n' "${DDR_FREQ_LABELS[$key]}"
+                return 0
+            fi
+        done
+    done
+
+    printf '%s\n' "${DDR_FREQ_LABELS[dynamic]}"
+}
+
+current_display_label() {
+    local extraargs token
+
+    extraargs="$(get_env_value extraargs)"
+    for token in ${extraargs}; do
+        case "${token}" in
+            "${DISPLAY_MODES[1080p]}") printf '%s\n' "1920x1080" ; return 0 ;;
+            "${DISPLAY_MODES[720p]}") printf '%s\n' "1280x720" ; return 0 ;;
+            "${DISPLAY_MODES[1024x768]}") printf '%s\n' "1024x768" ; return 0 ;;
+        esac
+    done
+
+    printf '%s\n' "Not Set"
+}
+
+select_cpu_freq_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select CPU Max Frequency\n\nCurrent: $(current_cpu_freq_label)" \
+        "816" "816 MHz (safest/stablest)" \
+        "1008" "1008 MHz" \
+        "1200" "1200 MHz (highest)" )" || return 1
+
+    apply_cpu_freq_choice "${selection}"
+}
+
+select_cpu_governor_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select CPU Governor\n\nCurrent: $(current_cpu_governor_label)" \
+        "powersave" "${CPU_GOVERNOR_LABELS[powersave]}" \
+        "conservative" "${CPU_GOVERNOR_LABELS[conservative]}" \
+        "ondemand" "${CPU_GOVERNOR_LABELS[ondemand]}" \
+        "interactive" "${CPU_GOVERNOR_LABELS[interactive]}" \
+        "userspace" "${CPU_GOVERNOR_LABELS[userspace]}" \
+        "performance" "${CPU_GOVERNOR_LABELS[performance]}")" || return 1
+
+    apply_cpu_governor_choice "${selection}"
+}
+
+select_ddr_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select Dynamic RAM Frequency\n\nCurrent RAM Freq: $(current_ddr_clock_label)\nConfigured Mode: $(current_ddr_mode_label)" \
+        "disabled" "${DDR_FREQ_LABELS[disabled]}" \
+        "dynamic" "${DDR_FREQ_LABELS[dynamic]}" \
+        "300" "${DDR_FREQ_LABELS[300]}" \
+        "330" "${DDR_FREQ_LABELS[330]}" \
+        "400" "${DDR_FREQ_LABELS[400]}" \
+        "600" "${DDR_FREQ_LABELS[600]}" \
+        "666" "${DDR_FREQ_LABELS[666]}" \
+        "700" "${DDR_FREQ_LABELS[700]}" \
+        "786" "${DDR_FREQ_LABELS[786]}" \
+        "800" "${DDR_FREQ_LABELS[800]}")" || return 1
+
+    apply_ddr_choice "${selection}"
+}
+
+select_cpu_menu() {
+    local selection
+
+    while true; do
+        selection="$(dialog_menu \
+            "CPU Configuration\n\nMax Frequency: $(current_cpu_freq_label)\nGovernor: $(current_cpu_governor_label)" \
+            "freq" "Set CPU Max Frequency" \
+            "governor" "Set CPU Governor" \
+            "back" "Return to Main Menu")" || return 1
+
+        case "${selection}" in
+            freq)
+                select_cpu_freq_menu || true
+                ;;
+            governor)
+                select_cpu_governor_menu || true
+                ;;
+            back)
+                break
+                ;;
+        esac
+    done
+}
+
+select_wifi_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select Wi-Fi Interface\n\nCurrent: $(current_wifi_label)" \
+        "esp8089" "${WIFI_LABELS[esp8089]}" \
+        "ssv6051" "${WIFI_LABELS[ssv6051]}" \
+        "rtl8189es" "${WIFI_LABELS[rtl8189es]}" \
+        "rtl8189fs" "${WIFI_LABELS[rtl8189fs]}" \
+        "other" "${WIFI_LABELS[other]}" \
+        "disabled" "${WIFI_LABELS[disabled]}")" || return 1
+
+    apply_wifi_choice "${selection}"
+}
+
+select_uart_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select UART Mode\n\nCurrent: $(current_uart_label)" \
+        "uart1" "Enable UART1" \
+        "uart2" "Enable UART2 (Disable SD Card)" \
+        "disabled" "Disable UART")" || return 1
+
+    apply_uart_choice "${selection}" || true
+}
+
+select_sdcard_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select SD Card Mode\n\nCurrent: $(current_sdcard_label)" \
+        "enabled" "Enable SD Card" \
+        "disabled" "Disable SD Card")" || return 1
+
+    apply_sdcard_choice "${selection}" || true
+}
+
+select_otg_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select USB OTG Boot Mode\n\nCurrent: $(current_otg_label)" \
+        "host" "${OTG_LABELS[host]}" \
+        "peripheral" "${OTG_LABELS[peripheral]}")" || return 1
+
+    apply_otg_choice "${selection}" || true
+}
+
+select_display_menu() {
+    local selection
+
+    selection="$(dialog_menu \
+        "Select HDMI Display Resolution\n\nCurrent: $(current_display_label)" \
+        "1080p" "1920x1080 @ 60Hz" \
+        "720p" "1280x720 @ 60Hz" \
+        "1024x768" "1024x768 @ 60Hz")" || return 1
+
+    apply_display_choice "${selection}"
+}
+
+show_summary() {
+    local content
+
+    content="Current Settings
+----------------
+
+$(current_status_lines)
+
+Additional Info
+---------------
+$(format_info_line "DDR Mode" "$(current_ddr_mode_label)")
+$(format_info_line "Env File" "${ARMBIAN_ENV_TXT}")
+$(format_info_line "Wi-Fi State" "${WIFI_STATE_CONF}")
+$(format_info_line "Wi-Fi Loader" "${WIFI_LOADER_SERVICE}")"
+
+    dialog_textbox_from_string "${content}"
+}
+
+show_help() {
+    local content
+
+    content="RK3128 Configuration Guide
+
+Current Status
+--------------
+$(current_status_lines)
+
+Wi-Fi
+-----
+ESP8089
+  Overlays : ${WIFI_OVERLAY_CANDIDATES[esp8089]:-(none)}
+  Drivers  : ${WIFI_MODULE_CANDIDATES[esp8089]:-(none)}
+
+SSV6051
+  Overlays : ${WIFI_OVERLAY_CANDIDATES[ssv6051]:-(none)}
+  Drivers  : ${WIFI_MODULE_CANDIDATES[ssv6051]:-(none)}
+
+RTL8189ES / ETV
+  Overlays : ${WIFI_OVERLAY_CANDIDATES[rtl8189es]:-(none)}
+  Drivers  : ${WIFI_MODULE_CANDIDATES[rtl8189es]:-(none)}
+
+RTL8189FS / FTV
+  Overlays : ${WIFI_OVERLAY_CANDIDATES[rtl8189fs]:-(none)}
+  Drivers  : ${WIFI_MODULE_CANDIDATES[rtl8189fs]:-(none)}
+  Note     : separate from RTL8189ES/ETV
+
+Other Wi-Fi
+  Overlays : none
+  Drivers  : no forced module
+
+Disabled
+  Overlays : none
+  Drivers  : none forced
+  Blacklist: ${BLACKLIST_MODPROBE_CONF}
+
+UART / SD
+---------
+UART1     : ${UART_OVERLAY_CANDIDATES[uart1]}
+UART2     : ${UART_OVERLAY_CANDIDATES[uart2]} (disables SD Card)
+UART Off  : no UART overlay
+SD On     : ${SDCARD_ENABLE_OVERLAY}
+SD Off    : no SD Card overlay
+
+Display / OTG
+-------------
+1080p      : ${DISPLAY_MODES[1080p]}
+720p       : ${DISPLAY_MODES[720p]}
+1024x768   : ${DISPLAY_MODES[1024x768]}
+OTG Host   : ${OTG_OVERLAY_CANDIDATES[host]}
+OTG Device : ${OTG_OVERLAY_CANDIDATES[peripheral]}
+
+CPU / DDR
+---------
+Max Freq Path : ${CPU_MAX_FREQ_PATH}
+Governor Path : ${CPU_GOVERNOR_PATH}
+CPU Config    : ${CPUFREQUTILS_CONF}
+
+CPU Frequency Choices
+  816 MHz   -> ${CPU_FREQ_VALUES[816]} KHz
+  1008 MHz  -> ${CPU_FREQ_VALUES[1008]} KHz
+  1200 MHz  -> ${CPU_FREQ_VALUES[1200]} KHz
+  MIN speed -> ${CPU_MIN_FREQ_VALUE} KHz in cpufrequtils
+
+Governor Order
+  powersave     -> lowest power usage
+  conservative  -> prefers slower ramp-up
+  ondemand      -> balanced
+  interactive   -> more responsive
+  userspace     -> manual userspace control
+  performance   -> highest performance
+
+DDR Choices
+  Disabled  -> ${DDR_OVERLAY_CANDIDATES[disabled]}
+  Dynamic   -> no DDR overlay
+  300       -> ${DDR_OVERLAY_CANDIDATES[300]}
+  330       -> ${DDR_OVERLAY_CANDIDATES[330]}
+  400       -> ${DDR_OVERLAY_CANDIDATES[400]}
+  600       -> ${DDR_OVERLAY_CANDIDATES[600]}
+  666       -> ${DDR_OVERLAY_CANDIDATES[666]}
+  700       -> ${DDR_OVERLAY_CANDIDATES[700]}
+  786       -> ${DDR_OVERLAY_CANDIDATES[786]}
+  800       -> ${DDR_OVERLAY_CANDIDATES[800]}
+
+Notes
+-----
+- Wi-Fi, UART, SD Card, USB OTG and DDR update /boot/armbianEnv.txt overlays=
+- Display updates /boot/armbianEnv.txt extraargs=
+- The script writes ${WIFI_STATE_CONF} with the selected Wi-Fi driver
+- The script installs ${WIFI_LOADER_SERVICE} to load the selected Wi-Fi driver later in boot
+- The script writes ${BLACKLIST_MODPROBE_CONF} to block unsupported onboard Wi-Fi drivers
+- Legacy ${LEGACY_MODULES_LOAD_CONF} is removed to avoid early boot module loading
+- Wi-Fi modules are not modprobed immediately because the new DT overlay is only active after reboot
+- CPU max/governor options are applied immediately through sysfs and also saved to ${CPUFREQUTILS_CONF}
+- DDR changes apply after reboot
+- A reboot is recommended after changes"
+
+    dialog_textbox_from_string "${content}"
+}
+
+offer_reboot() {
+    if [ "${CHANGED}" -eq 0 ]; then
+        dialog_msg "No changes were made."
+        return 0
+    fi
+
+    if dialog_yesno "Settings were updated.\n\nA restart is required for all changes to take effect.\n\nRestart now?"; then
+        reboot
+    else
+        dialog_msg "Settings saved.\n\nPlease restart the board when convenient."
+    fi
+}
+
+main_menu() {
+    local selection
+
+    while true; do
+        selection="$(dialog_menu \
+            "${MENU_TITLE}\n\n$(current_status_overview)" \
+            "cpu" "CPU Configuration" \
+            "ram" "Dynamic RAM Freq Configuration" \
+            "sdcard" "Select SD Card Mode" \
+            "uart" "Select UART Mode" \
+            "wifi" "Select Wi-Fi Interface" \
+            "display" "Select Display Resolution" \
+            "otg" "Select USB OTG Boot Mode" \
+            "summary" "Show Current Summary" \
+            "help" "Show Overlay and Driver Mapping" \
+            "finish" "Save and Exit")" || break
+
+        case "${selection}" in
+            cpu)
+                select_cpu_menu || true
+                ;;
+            ram)
+                select_ddr_menu || true
+                ;;
+            sdcard)
+                select_sdcard_menu || true
+                ;;
+            uart)
+                select_uart_menu || true
+                ;;
+            wifi)
+                select_wifi_menu || true
+                ;;
+            display)
+                select_display_menu || true
+                ;;
+            otg)
+                select_otg_menu || true
+                ;;
+            summary)
+                show_summary
+                ;;
+            help)
+                show_help
+                ;;
+            finish)
+                break
+                ;;
+        esac
+    done
+}
+
+need_root
+need_dialog
+need_armbian_env
+need_cpu_sysfs
+
+overlay_prefix="$(get_env_value overlay_prefix)"
+overlay_prefix="${overlay_prefix:-rk3128}"
+
+main_menu
+offer_reboot

@@ -3,81 +3,275 @@
 # Please edit /boot/armbianEnv.txt to set supported parameters
 #
 
-setenv ramdisk_addr_r "0x64000000"
-setenv load_addr "0x600f0000"
-setenv overlay_error "false"
-# default values
-setenv rootdev "/dev/mmcblk0p1"
-setenv verbosity "1"
-setenv console "both"
-setenv bootlogo "false"
-setenv rootfstype "ext4"
-setenv docker_optimizations "on"
+setenv ramdisk_addr_r 0x64000000
+setenv load_addr 0x600f0000
+setenv overlay_error false
+setenv bootargs
+setenv consoleargs
+setenv dockerargs
+setenv partuuid
+setenv rootdev
+setenv rootpartname
+setenv nandrootpartname
+setenv boot_source unknown
+setenv bootdev_desc
+setenv required_boot_overlay
+setenv blocked_boot_overlay
+setenv filtered_overlays
+setenv required_boot_overlay_seen false
+setenv keep_overlay false
 
-# If gpio3 pin 25 is 0, write magic to GRF os_reg[0] register and
-# reset to trigger maskrom mode
-if gpio input 121; then 
-	echo "Resetting into MASKROM mode..."
-        mw.l 0x110005c8 0xEF08A53C 1
-        reset
+# Default values (only if not set by armbianEnv.txt)
+if test -z "${verbosity}"; then setenv verbosity 1; fi
+if test -z "${console}"; then setenv console ttyS1,115200; fi
+if test -z "${bootlogo}"; then setenv bootlogo false; fi
+if test -z "${rootfstype}"; then setenv rootfstype ext4; fi
+if test -z "${docker_optimizations}"; then setenv docker_optimizations on; fi
+if test -z "${mtdparts}"; then setenv mtdparts rk29xxnand:0x00002000@0x00002000(uboot),0x00002000@0x00004000(trust),-@0x0006000(root); fi
+if test -z "${overlay_prefix}"; then setenv overlay_prefix rk3128; fi
+if test -z "${partnum}"; then setenv partnum 1; fi
+
+echo "[DEBUG] ========= Boot script loaded from ${devtype} ${devnum}"
+setenv bootpart "${devnum}:${partnum}"
+echo "[DEBUG] ========= Boot files will be loaded from ${devtype} ${bootpart}"
+
+# Load armbianEnv.txt if present
+if test -e ${devtype} ${bootpart} ${prefix}armbianEnv.txt; then
+    load ${devtype} ${bootpart} ${load_addr} ${prefix}armbianEnv.txt
+    env import -t -r ${load_addr} ${filesize}
 fi
 
+# Reset internal scratch variables after importing armbianEnv.txt.
+setenv boot_source unknown
+setenv bootdev_desc "${devtype} ${devnum}"
+setenv required_boot_overlay
+setenv blocked_boot_overlay
+setenv filtered_overlays
+setenv required_boot_overlay_seen false
+setenv keep_overlay false
 
-echo "Boot script loaded from ${devtype} ${devnum}"
-
-if test -e ${devtype} ${devnum} ${prefix}armbianEnv.txt; then
-	load ${devtype} ${devnum} ${load_addr} ${prefix}armbianEnv.txt
-	env import -t ${load_addr} ${filesize}
+if test -z "${nandrootpartname}"; then
+    if test -n "${rootpartname}"; then
+        setenv nandrootpartname "${rootpartname}"
+    else
+        setenv nandrootpartname root
+    fi
 fi
+
+# Linux block device numbering is probe-order dependent, so use PARTUUID when
+# U-Boot can provide one for the current boot partition.
+if test "${devtype}" = "mmc"; then
+    part uuid mmc ${devnum}:${partnum} partuuid
+fi
+if test "${devtype}" = "usb"; then
+    part uuid usb ${devnum}:${partnum} partuuid
+fi
+
+# Detect the real boot medium so storage/UART overlays can be corrected even if
+# armbianEnv.txt contains stale or conflicting values.
+if test "${devtype}" = "usb"; then
+    setenv boot_source usb
+    setenv bootdev_desc "USB"
+fi
+
+if test "${devtype}" = "rknand"; then
+    setenv boot_source nand
+    setenv bootdev_desc "NAND"
+fi
+
+if test "${devtype}" = "mmc"; then
+    setenv bootdev_desc "MMC device ${devnum}"
+
+    # RK3128 boards wire the first MMC controller as eMMC and the second as SD.
+    if test "${devnum}" = "0"; then
+        setenv boot_source emmc
+        setenv bootdev_desc "eMMC (mmc device ${devnum})"
+    fi
+
+    if test "${devnum}" = "1"; then
+        setenv boot_source sd
+        setenv bootdev_desc "SD card (mmc device ${devnum})"
+    fi
+fi
+
+echo "[DEBUG] ========= Detected boot medium: ${bootdev_desc}"
+
+# Storage boot must override conflicting armbianEnv.txt overlays:
+# - eMMC boot requires emmc-enabled
+# - SD boot requires sdcard-enabled and must not keep UART2's SD-disabling overlay
+# - NAND boot must not keep emmc-enabled
+if test "${boot_source}" = "emmc"; then
+    setenv required_boot_overlay emmc-enabled
+fi
+
+if test "${boot_source}" = "sd"; then
+    setenv required_boot_overlay sdcard-enabled
+    setenv blocked_boot_overlay gpio2-sdcard-disabled
+fi
+
+if test "${boot_source}" = "nand"; then
+    setenv blocked_boot_overlay emmc-enabled
+fi
+
+setenv filtered_overlays
+setenv required_boot_overlay_seen false
+for overlay_file in ${overlays}; do
+    setenv keep_overlay true
+
+    if test -n "${blocked_boot_overlay}"; then
+        if test "${overlay_file}" = "${blocked_boot_overlay}"; then
+            echo "[DEBUG] ========= Removing conflicting overlay ${overlay_prefix}-${overlay_file}.dtbo for ${bootdev_desc} boot"
+            setenv keep_overlay false
+        fi
+    fi
+
+    if test "${keep_overlay}" = "true"; then
+        if test -n "${required_boot_overlay}"; then
+            if test "${overlay_file}" = "${required_boot_overlay}"; then
+                if test "${required_boot_overlay_seen}" = "true"; then
+                    echo "[DEBUG] ========= Removing duplicate overlay ${overlay_prefix}-${overlay_file}.dtbo"
+                    setenv keep_overlay false
+                else
+                    setenv required_boot_overlay_seen true
+                fi
+            fi
+        fi
+    fi
+
+    if test "${keep_overlay}" = "true"; then
+        if test -z "${filtered_overlays}"; then
+            setenv filtered_overlays "${overlay_file}"
+        else
+            setenv filtered_overlays "${filtered_overlays} ${overlay_file}"
+        fi
+    fi
+done
+setenv overlays "${filtered_overlays}"
+
+if test -n "${required_boot_overlay}"; then
+    if test "${required_boot_overlay_seen}" = "false"; then
+        echo "[DEBUG] ========= Forcing overlay ${overlay_prefix}-${required_boot_overlay}.dtbo for ${bootdev_desc} boot"
+        if test -z "${overlays}"; then
+            setenv overlays "${required_boot_overlay}"
+        else
+            setenv overlays "${overlays} ${required_boot_overlay}"
+        fi
+    fi
+fi
+
+# Root device auto detection (only if not defined in armbianEnv.txt)
+if test -z "${rootdev}"; then
+
+    if test "${devtype}" = "mmc"; then
+        if test -n "${partuuid}"; then
+            echo "Detected ${bootdev_desc} boot, using PARTUUID ${partuuid}"
+            setenv rootdev "PARTUUID=${partuuid}"
+        else
+            echo "Detected ${bootdev_desc} boot, PARTUUID unavailable"
+            setenv rootdev "/dev/mmcblk${devnum}p${partnum}"
+        fi
+    fi
+
+    if test "${devtype}" = "usb"; then
+        if test -n "${partuuid}"; then
+            echo "Detected USB boot, using PARTUUID ${partuuid}"
+            setenv rootdev "PARTUUID=${partuuid}"
+        else
+            echo "Detected USB boot, PARTUUID unavailable"
+            setenv rootdev "/dev/sda${partnum}"
+        fi
+    fi
+
+    if test "${devtype}" = "rknand"; then
+        echo "Detected NAND boot"
+        setenv rootdev "/dev/rknand_${nandrootpartname}"
+    fi
+
+fi
+
+echo "[DEBUG] ========= NAND root partition name: ${nandrootpartname}"
+echo "[DEBUG] ========= Root device: ${rootdev}"
+echo "[DEBUG] ========= Boot partition UUID: ${partuuid}"
 
 if test "${logo}" = "disabled"; then setenv logo "logo.nologo"; fi
 
-# get PARTUUID of first partition on SD/eMMC the boot script was loaded from
-if test "${devtype}" = "mmc"; then part uuid mmc ${devnum}:1 partuuid; fi
 if test "${bootlogo}" = "true"; then
-	setenv consoleargs "splash plymouth.ignore-serial-consoles ${consoleargs}"
-else
-	setenv consoleargs "splash=verbose ${consoleargs}"
+    setenv consoleargs "bootsplash.bootfile=bootsplash.armbian ${consoleargs}"
 fi
 
-setenv bootargs "earlyprintk root=${rootdev} console=ttyS2,115200n8 console=tty1 rootwait rootfstype=${rootfstype} ${consoleargs} consoleblank=0 loglevel=${verbosity} ubootpart=${partuuid} usb-storage.quirks=${usbstoragequirks} ${extraargs} ${extraboardargs}"
+setenv dockerargs
+if test "${docker_optimizations}" = "on"; then
+    setenv dockerargs "cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1"
+fi
 
-if test "${docker_optimizations}" = "on"; then setenv bootargs "${bootargs} cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory"; fi
+setenv bootargs "console=${console} loglevel=${verbosity} ignore_loglevel earlycon root=${rootdev} rootwait rw rootfstype=${rootfstype} ${consoleargs} consoleblank=0  ubootpart=${partuuid} usb-storage.quirks=${usbstoragequirks} ${extraargs} ${extraboardargs} mtdparts=${mtdparts} ${dockerargs}"
 
-load ${devtype} ${devnum} ${ramdisk_addr_r} ${prefix}uInitrd
-load ${devtype} ${devnum} ${kernel_addr_r} ${prefix}zImage
+# Load initrd
+echo "[DEBUG] ========= Loading initrd from: ${devtype} ${bootpart} ${ramdisk_addr_r} ${prefix}uInitrd"
+load ${devtype} ${bootpart} ${ramdisk_addr_r} ${prefix}uInitrd
 
-load ${devtype} ${devnum} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
+# Load kernel
+echo "[DEBUG] ========= Loading kernel from: ${devtype} ${bootpart} ${kernel_addr_r} ${prefix}zImage"
+load ${devtype} ${bootpart} ${kernel_addr_r} ${prefix}zImage
+
+# Load device tree
+echo "[DEBUG] ========= Loading dtb from: ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}"
+load ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
 fdt addr ${fdt_addr_r}
 fdt resize 65536
+
+# Apply kernel overlays
+
+# For USB OTG support, either usb-otg-host or usb-otg-peripheral overlay must be applied. If none of them is set, apply usb-otg-host by default.
+setenv otg_overlay_set false
 for overlay_file in ${overlays}; do
-	if load ${devtype} ${devnum} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-${overlay_file}.dtbo; then
-		echo "Applying kernel provided DT overlay ${overlay_prefix}-${overlay_file}.dtbo"
-		fdt apply ${load_addr} || setenv overlay_error "true"
-	fi
+    if test "${overlay_file}" = "usb-otg-host"; then setenv otg_overlay_set true; fi
+    if test "${overlay_file}" = "usb-otg-peripheral"; then setenv otg_overlay_set true; fi
 done
-for overlay_file in ${user_overlays}; do
-	if load ${devtype} ${devnum} ${load_addr} ${prefix}overlay-user/${overlay_file}.dtbo; then
-		echo "Applying user provided DT overlay ${overlay_file}.dtbo"
-		fdt apply ${load_addr} || setenv overlay_error "true"
-	fi
-done
-if test "${overlay_error}" = "true"; then
-	echo "Error applying DT overlays, restoring original DT"
-	load ${devtype} ${devnum} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
-else
-	if load ${devtype} ${devnum} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-fixup.scr; then
-		echo "Applying kernel provided DT fixup script (${overlay_prefix}-fixup.scr)"
-		source ${load_addr}
-	fi
-	if test -e ${devtype} ${devnum} ${prefix}fixup.scr; then
-		load ${devtype} ${devnum} ${load_addr} ${prefix}fixup.scr
-		echo "Applying user provided fixup script (fixup.scr)"
-		source ${load_addr}
-	fi
+
+if test "${otg_overlay_set}" = "false"; then
+    if test -z "${overlays}"; then
+        setenv overlays "usb-otg-host"
+    else
+        setenv overlays "${overlays} usb-otg-host"
+    fi
 fi
 
+for overlay_file in ${overlays}; do
+    if load ${devtype} ${bootpart} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-${overlay_file}.dtbo; then
+        echo "[DEBUG] ========= Applying kernel overlay ${overlay_prefix}-${overlay_file}.dtbo"
+        fdt apply ${load_addr} || setenv overlay_error true
+    fi
+done
+
+# Apply user overlays
+for overlay_file in ${user_overlays}; do
+    if load ${devtype} ${bootpart} ${load_addr} ${prefix}overlay-user/${overlay_file}.dtbo; then
+        echo "[DEBUG] ========= Applying user overlay ${overlay_file}.dtbo"
+        fdt apply ${load_addr} || setenv overlay_error true
+    fi
+done
+
+# Fixup scripts
+if test "${overlay_error}" = "true"; then
+    echo "Overlay error, restoring original DT"
+    load ${devtype} ${bootpart} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
+else
+    if load ${devtype} ${bootpart} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-fixup.scr; then
+        echo "[DEBUG] ========= Applying fixup script"
+        source ${load_addr}
+    fi
+
+    if test -e ${devtype} ${bootpart} ${prefix}fixup.scr; then
+        load ${devtype} ${bootpart} ${load_addr} ${prefix}fixup.scr
+        echo "[DEBUG] ========= Applying user fixup script"
+        source ${load_addr}
+    fi
+fi
+
+echo "[DEBUG] ========= Now trying to boot using bootz."
+echo "[DEBUG] ========= Boot arg is: ${bootargs}"
 bootz ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}
 
-# Recompile with:
-# mkimage -C none -A arm -T script -d /boot/boot.cmd /boot/boot.scr
+# Always remember to use mkimage shipped with this U-boot version. Recompile with:
+# mkimage -A arm -T script -C none -n "Armbian boot script for RK3128 by https://chieunhatnang.de" -d boot.cmd boot.scr
