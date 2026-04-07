@@ -1,0 +1,17 @@
+#!/bin/bash
+echo "Armbian 'armbian-bsp-cli-rk322x-box-current' for '1-PC8f91-V5e5d-He14c-B8122-Rf36a': 'postrm' starting."
+set +e # NO ERROR CONTROL, for compatibility with legacy Armbian scripts.
+#set -e # Debugging
+
+
+## begin contents of 'board_side_bsp_cli_postrm'
+    if [[ remove == "$1" ]] || [[ abort-install == "$1" ]]; then
+        systemctl disable armbian-hardware-monitor.service armbian-hardware-optimize.service > /dev/null 2>&1;
+        systemctl disable armbian-zram-config.service armbian-ramlog.service > /dev/null 2>&1;
+        systemctl disable armbian-live-patch.service > /dev/null 2>&1;
+    fi
+## end contents of 'board_side_bsp_cli_postrm'
+
+set +x # Disable debugging
+echo "Armbian 'armbian-bsp-cli-rk322x-box-current' for '1-PC8f91-V5e5d-He14c-B8122-Rf36a': 'postrm' finishing."
+true

@@ -1,0 +1,65 @@
+#!/bin/bash
+echo "Armbian 'armbian-bsp-cli-rk322x-box-current' for '1-PC8f91-V5e5d-He14c-B8122-Rf36a': 'postinst' starting."
+set +e # NO ERROR CONTROL, for compatibility with legacy Armbian scripts.
+#set -e # Debugging
+
+
+## begin contents of 'board_side_bsp_cli_postinst_base'
+    [ -f /etc/armbian-release ] && . /etc/armbian-release;
+    [ -f /etc/lib/systemd/system/armbian-ramlog.service ] && systemctl --no-reload enable armbian-ramlog.service;
+    if [ -n "$(grep -w '^ENABLED=false' /etc/default/log2ram 2> /dev/null)" ]; then
+        sed -i "s/^ENABLED=.*/ENABLED=false/" /etc/default/armbian-ramlog;
+    fi;
+    if [ -f "/etc/initramfs-tools/initramfs.conf" ]; then
+        if ! grep --quiet "RESUME=none" /etc/initramfs-tools/initramfs.conf; then
+            echo "RESUME=none" >> /etc/initramfs-tools/initramfs.conf;
+        fi;
+    fi
+## end contents of 'board_side_bsp_cli_postinst_base'
+
+## begin contents of 'board_side_bsp_cli_postinst_update_uboot_bootscript'
+    if [[ ${BOOTSCRIPT_FORCE_UPDATE} == yes || ! -f /boot/${BOOTSCRIPT_DST} ]]; then
+        [ -z ${BOOTSCRIPT_BACKUP_VERSION} ] && BOOTSCRIPT_BACKUP_VERSION="$(date +%s)";
+        if [ -f /boot/${BOOTSCRIPT_DST} ]; then
+            cp -v /boot/${BOOTSCRIPT_DST} /usr/share/armbian/${BOOTSCRIPT_DST}-${BOOTSCRIPT_BACKUP_VERSION};
+            echo "NOTE: You can find previous bootscript versions in /usr/share/armbian !";
+        fi;
+        echo "Recreating boot script";
+        cp -v /usr/share/armbian/${BOOTSCRIPT_DST} /boot;
+        rootdev=$(sed -e 's/^.*root=//' -e 's/ .*\$//' < /proc/cmdline);
+        rootfstype=$(sed -e 's/^.*rootfstype=//' -e 's/ .*$//' < /proc/cmdline);
+        if [ ! -f /boot/armbianEnv.txt ] && [ ! -f /boot/extlinux/extlinux.conf ]; then
+            cp -v /usr/share/armbian/armbianEnv.txt /boot;
+            echo "rootdev="\$rootdev >> /boot/armbianEnv.txt;
+            echo "rootfstype="\$rootfstype >> /boot/armbianEnv.txt;
+        fi;
+        [ -f /boot/boot.ini ] && sed -i "s/setenv rootdev.*/setenv rootdev \\"$rootdev\\"/" /boot/boot.ini;
+        [ -f /boot/boot.ini ] && sed -i "s/setenv rootfstype.*/setenv rootfstype \\"$rootfstype\\"/" /boot/boot.ini;
+        [ -f /boot/boot.cmd ] && mkimage -C none -A arm -T script -d /boot/boot.cmd /boot/boot.scr > /dev/null 2>&1;
+    fi
+## end contents of 'board_side_bsp_cli_postinst_update_uboot_bootscript'
+
+## begin contents of 'board_side_bsp_cli_postinst_finish'
+    ln -sf /var/run/motd /etc/motd;
+    rm -f /etc/update-motd.d/00-header /etc/update-motd.d/10-help-text;
+    if [ ! -f "/etc/default/armbian-motd" ]; then
+        mv /etc/default/armbian-motd.dpkg-dist /etc/default/armbian-motd;
+    fi;
+    if [ ! -f "/etc/default/armbian-ramlog" ] && [ -f /etc/default/armbian-ramlog.dpkg-dist ]; then
+        mv /etc/default/armbian-ramlog.dpkg-dist /etc/default/armbian-ramlog;
+    fi;
+    if [ ! -f "/etc/default/armbian-zram-config" ] && [ -f /etc/default/armbian-zram-config.dpkg-dist ]; then
+        mv /etc/default/armbian-zram-config.dpkg-dist /etc/default/armbian-zram-config;
+    fi;
+    if [ ! -f "/etc/default/armbian-firstrun" ]; then
+        mv /etc/default/armbian-firstrun.dpkg-dist /etc/default/armbian-firstrun;
+    fi;
+    if [ -L "/usr/lib/chromium-browser/master_preferences.dpkg-dist" ]; then
+        mv /usr/lib/chromium-browser/master_preferences.dpkg-dist /usr/lib/chromium-browser/master_preferences;
+    fi;
+    systemctl --no-reload enable armbian-hardware-monitor.service armbian-hardware-optimize.service armbian-zram-config.service armbian-led-state.service > /dev/null 2>&1
+## end contents of 'board_side_bsp_cli_postinst_finish'
+
+set +x # Disable debugging
+echo "Armbian 'armbian-bsp-cli-rk322x-box-current' for '1-PC8f91-V5e5d-He14c-B8122-Rf36a': 'postinst' finishing."
+true

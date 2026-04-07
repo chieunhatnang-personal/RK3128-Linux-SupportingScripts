@@ -1,0 +1,13 @@
+buster=eos;upgrade=bullseye,bookworm,trixie,testing
+focal=eos;upgrade=jammy,noble,oracular,plucky
+bullseye=eos;upgrade=bookworm,trixie,testing
+bookworm=csc;upgrade=trixie,testing
+jammy=csc;upgrade=noble,oracular,plucky
+noble=supported;upgrade=oracular,plucky
+trixie=supported;upgrade=forky,testing
+oracular=eos;upgrade=plucky
+plucky=csc;upgrade=none
+forky=csc;upgrade=testing
+questing=csc;upgrade=none
+resolute=csc;upgrade=none
+sid=csc;upgrade=none
