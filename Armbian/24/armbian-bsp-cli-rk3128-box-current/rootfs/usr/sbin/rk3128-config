@@ -275,15 +275,15 @@ EOF
 Description=Load the selected RK3128 Wi-Fi driver
 ConditionPathExists=${WIFI_STATE_CONF}
 After=systemd-modules-load.service systemd-udev-settle.service
-Wants=network-pre.target systemd-udev-settle.service
-Before=network-pre.target
+Wants=systemd-udev-settle.service
+Before=NetworkManager.service wpa_supplicant.service network-pre.target
 
 [Service]
 Type=oneshot
 ExecStart=${WIFI_LOADER_SCRIPT}
 
 [Install]
-WantedBy=network-pre.target
+WantedBy=multi-user.target
 EOF
     mv "${temp_file}" "${WIFI_LOADER_SERVICE}"
 
