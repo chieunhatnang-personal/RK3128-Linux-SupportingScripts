@@ -30,6 +30,7 @@ VENDORTEMP="${VENDOR:-}"
 safe_source /etc/armbian-release
 [[ -n "${VENDORTEMP}" && "${VENDORTEMP}" != "${VENDOR:-}" ]] && VENDOR="${VENDORTEMP}"
 [[ -n "${VENDORPRETTYNAME:-}" ]] && VENDOR="${VENDORPRETTYNAME}"
+MOTD_VENDOR="${VENDOR}-RK3128"
 
 # --- Distribution and upgrade information ---
 DISTRIBUTION_CODENAME=""
@@ -85,15 +86,15 @@ _motd_mark_after_header
 # --- Vendor banner ---
 if [[ -n "${VENDORCOLOR:-}" ]]; then
 	if command -v figlet >/dev/null 2>&1; then
-		printf '\e[38;2;%sm%s\e[0m\n' "${VENDORCOLOR}" "$(figlet -f small " ${VENDOR}")"
+		printf '\e[38;2;%sm%s\e[0m\n' "${VENDORCOLOR}" "$(figlet -f small " ${MOTD_VENDOR}")"
 	else
-		printf '\e[38;2;%sm### %s ###\e[0m\n' "${VENDORCOLOR}" "${VENDOR}"
+		printf '\e[38;2;%sm### %s ###\e[0m\n' "${VENDORCOLOR}" "${MOTD_VENDOR}"
 	fi
 else
 	if command -v figlet >/dev/null 2>&1; then
-		printf '\e[1;91m%s\e[0m\n' "$(figlet -f small " ${VENDOR}")"
+		printf '\e[1;91m%s\e[0m\n' "$(figlet -f small " ${MOTD_VENDOR}")"
 	else
-		printf '\e[1;91m### %s ###\e[0m\n' "${VENDOR}"
+		printf '\e[1;91m### %s ###\e[0m\n' "${MOTD_VENDOR}"
 	fi
 fi
 
@@ -140,6 +141,7 @@ if [[ -f /var/cache/apt/archives/updates.number ]]; then
 	# shellcheck disable=SC1091
 	. /var/cache/apt/archives/updates.number
 fi
+INSTALLED_PACKAGES="$(awk '/^Status: install ok installed$/{c++} END{print c+0}' /var/lib/dpkg/status 2>/dev/null)"
 UPDATE_STATUS=""
 if [[ "${NUM_UPDATES:-0}" -gt 0 ]]; then
 	if apt-mark showhold 2>/dev/null | grep -q '^linux-image'; then
@@ -157,7 +159,11 @@ printf '\n'
 # --- Display summary ---
 if [[ -n "${DISTRO_STATUS:-}" ]]; then
 	[[ -n "${upgrade}" ]] && DISTRO_STATUS+=", possible distro upgrade (${upgrade})"
-	printf ' Packages:     %s %b\n' "${DISTRIBUTION_ID^}" "${DISTRO_STATUS}"
+	printf ' Packages:     %s %b' "${DISTRIBUTION_ID^}" "${DISTRO_STATUS}"
+	if [[ "${INSTALLED_PACKAGES:-0}" -gt 0 ]]; then
+		printf ', \e[1;92m%s\x1B[0m installed' "${INSTALLED_PACKAGES}"
+	fi
+	printf '\n'
 fi
 
 [[ -n "${UPDATE_STATUS}" ]] && printf ' Updates:      %b\n' "${UPDATE_STATUS}"

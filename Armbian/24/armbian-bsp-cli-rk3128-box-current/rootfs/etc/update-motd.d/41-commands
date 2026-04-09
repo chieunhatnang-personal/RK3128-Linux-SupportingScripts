@@ -33,8 +33,7 @@ _motd_spacer() {
 # text, sudo / without, command, condition
 # condition can be fairly complex
 list=(
-    "Configuration","","armbian-config","true"
-    "Upgrade","","armbian-upgrade","[[ \"${NUM_UPDATES}\" -gt 0 ]]"
+    "Configuration","","rk3128-config","true"
     "Monitoring","","htop","true"
 )
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Print LAN/WAN IPv4 and IPv6 lines for Armbian MOTD.
+# Print Ethernet / Wi-Fi / WAN IPv4 and IPv6 lines for Armbian MOTD.
 # Standalone: discovers addresses itself and prints formatted output.
 
 set -o pipefail
@@ -31,19 +31,38 @@ _motd_mark_after_header() {
 get_wan_address()  { curl -4 -fsS --max-time 2 https://ipv4.whatismyip.akamai.com/ 2>/dev/null || true; }
 get_wan6_address() { curl -6 -fsS --max-time 2 https://ipv6.whatismyip.akamai.com/ 2>/dev/null || true; }
 
+classify_interface() {
+  local intf="$1"
+
+  if [[ -d "/sys/class/net/${intf}/wireless" || "${intf}" =~ ^wl ]]; then
+    printf '%s\n' "wifi"
+  else
+    printf '%s\n' "ethernet"
+  fi
+}
+
 get_lan_ips() {
-  # echo "<ipv4s space-separated>|<ipv6s space-separated>"
-  local ipv4s=() ipv6s=() intf
+  # echo "<eth4>|<wifi4>|<eth6>|<wifi6>"
+  local eth4s=() wifi4s=() eth6s=() wifi6s=() intf class
+  local add4=() add6=()
 
   for p in /sys/class/net/*; do
     intf="${p##*/}"
     [[ "$intf" =~ $HIDE_IP_PATTERN ]] && continue
+    class="$(classify_interface "$intf")"
 
     # IPv4 (order preserved, unique)
     mapfile -t add4 < <(ip -4 -o addr show dev "$intf" 2>/dev/null \
       | awk '$3=="inet"{print $4}' | cut -d/ -f1 || true)
     for a in "${add4[@]}"; do
-      [[ " ${ipv4s[*]} " == *" $a "* ]] || ipv4s+=("$a")
+      case "$class" in
+        wifi)
+          [[ " ${wifi4s[*]} " == *" $a "* ]] || wifi4s+=("$a")
+          ;;
+        *)
+          [[ " ${eth4s[*]} " == *" $a "* ]] || eth4s+=("$a")
+          ;;
+      esac
     done
 
     # IPv6 (prefer scope global when hiding link-local)
@@ -55,57 +74,56 @@ get_lan_ips() {
         | awk '$3=="inet6"{print $4}' | cut -d/ -f1 || true)
     fi
     for a in "${add6[@]}"; do
-      [[ " ${ipv6s[*]} " == *" $a "* ]] || ipv6s+=("$a")
+      case "$class" in
+        wifi)
+          [[ " ${wifi6s[*]} " == *" $a "* ]] || wifi6s+=("$a")
+          ;;
+        *)
+          [[ " ${eth6s[*]} " == *" $a "* ]] || eth6s+=("$a")
+          ;;
+      esac
     done
   done
 
-  printf '%s|%s\n' "${ipv4s[*]}" "${ipv6s[*]}"
+  printf '%s|%s|%s|%s\n' "${eth4s[*]}" "${wifi4s[*]}" "${eth6s[*]}" "${wifi6s[*]}"
 }
 
 print_ip_lines() {
-  local ipv4s="$1" ipv6s="$2" wan4="$3" wan6="$4"
-  # print a single blank line before the first post-header section
-  _motd_spacer() {
-    local tag="${1:-after-header}"
-    local dir="/run/armbian-motd"; local stamp="$dir/.${tag}.printed"
-    mkdir -p "$dir" 2>/dev/null
-    [[ -e "$stamp" ]] || { echo ""; : > "$stamp"; }
+  local eth4="$1" wifi4="$2" eth6="$3" wifi6="$4" wan4="$5" wan6="$6"
+  local printed=0
+
+  print_line() {
+    local label="$1" value="$2" color="$3"
+    [[ -z "$value" ]] && return 0
+    (( printed )) || { _motd_mark_after_header; printed=1; }
+    printf ' %-15s \x1B[%sm%s\x1B[0m\n' "${label}:" "${color}" "${value}"
   }
 
-  # Drop WAN duplicates from LAN lists
-  if [[ -n "$wan4" && " $ipv4s " == *" $wan4 "* ]]; then
-    ipv4s="$(printf '%s\n' $ipv4s | awk -v w="$wan4" '$0!=w' | paste -sd' ' -)"
+  # Drop WAN duplicates from local lists
+  if [[ -n "$wan4" ]]; then
+    eth4="$(printf '%s\n' ${eth4:-} | awk -v w="$wan4" 'NF && $0!=w' | paste -sd' ' -)"
+    wifi4="$(printf '%s\n' ${wifi4:-} | awk -v w="$wan4" 'NF && $0!=w' | paste -sd' ' -)"
   fi
-  if [[ -n "$wan6" && " $ipv6s " == *" $wan6 "* ]]; then
-    ipv6s="$(printf '%s\n' $ipv6s | awk -v w="$wan6" '$0!=w' | paste -sd' ' -)"
-  fi
-
-  # IPv4 line
-  if [[ -n "$ipv4s" || -n "$wan4" ]]; then
-    _motd_mark_after_header
-    local line=" IPv4:        "
-    [[ -n "$ipv4s" ]] && line+=" \x1B[93m(LAN)\x1B[0m \x1B[92m${ipv4s// /, }\x1B[0m "
-    [[ -n "$wan4"  ]] && line+="\x1B[93m(WAN)\x1B[0m \x1B[95m${wan4}\x1B[0m "
-    printf '%b\n' "$line"
+  if [[ -n "$wan6" ]]; then
+    eth6="$(printf '%s\n' ${eth6:-} | awk -v w="$wan6" 'NF && $0!=w' | paste -sd' ' -)"
+    wifi6="$(printf '%s\n' ${wifi6:-} | awk -v w="$wan6" 'NF && $0!=w' | paste -sd' ' -)"
   fi
 
-  # IPv6 line
-  if [[ -n "$ipv6s" || -n "$wan6" ]]; then
-    _motd_mark_after_header    
-    local line=" IPv6:         "
-    [[ -n "$ipv6s" ]] && line+="\x1B[96m${ipv6s// /, }\x1B[0m "
-    [[ -n "$wan6"  ]] && line+="\x1B[93m(WAN)\x1B[0m \x1B[95m${wan6}\x1B[0m "
-    printf '%b\n' "$line"
-  fi
+  print_line "Eth IPv4" "${eth4// /, }" "92"
+  print_line "WiFi IPv4" "${wifi4// /, }" "96"
+  print_line "WAN IPv4" "${wan4}" "95"
+  print_line "Eth IPv6" "${eth6// /, }" "92"
+  print_line "WiFi IPv6" "${wifi6// /, }" "96"
+  print_line "WAN IPv6" "${wan6}" "95"
 }
 
 main() {
-  local combo ipv4s ipv6s wan4 wan6
+  local combo eth4 wifi4 eth6 wifi6 wan4 wan6
   combo="$(get_lan_ips)"
-  IFS='|' read -r ipv4s ipv6s <<< "$combo"
+  IFS='|' read -r eth4 wifi4 eth6 wifi6 <<< "$combo"
   wan4="$(get_wan_address)"
   wan6="$(get_wan6_address)"
-  print_ip_lines "$ipv4s" "$ipv6s" "$wan4" "$wan6"
+  print_ip_lines "$eth4" "$wifi4" "$eth6" "$wifi6" "$wan4" "$wan6"
 }
 
 # If sourced, don't run main; if executed, run.

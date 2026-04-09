@@ -1,0 +1,4 @@
+|Use rk3128-config to change Wi-Fi, UART and DDR overlay settings.
+|Keep linux-image-6.6.89-rk3128+ and linux-headers-6.6.89-rk3128+ on hold before apt upgrade.
+|To build U-boot, Kernel and Armbian yourself for RK3128, visit https://chieunhatnang.de.
+|Visit https://chieunhatnang.de for builds, updates and news.

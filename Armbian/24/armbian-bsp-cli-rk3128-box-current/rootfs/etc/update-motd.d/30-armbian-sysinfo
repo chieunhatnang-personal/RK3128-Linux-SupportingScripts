@@ -41,6 +41,165 @@ command -v ambienttemp >/dev/null 2>&1 || ambienttemp() { echo ""; }
 command -v batteryinfo  >/dev/null 2>&1 || batteryinfo() { :; }
 command -v getboardtemp >/dev/null 2>&1 || getboardtemp() { board_temp=""; }
 
+read_cpu_label() {
+	if grep -aq 'rockchip,rk3128' /proc/device-tree/compatible 2>/dev/null; then
+		printf '%s\n' "Rockchip RK3128"
+		return 0
+	fi
+
+	if command -v lscpu >/dev/null 2>&1; then
+		awk -F: '/^Model name:/{gsub(/^[ \t]+/,"",$2); if ($2 != "") { print $2; exit }}' < <(lscpu 2>/dev/null)
+		return 0
+	fi
+
+	awk -F: '
+		/^Hardware|^model name|^Processor/ {
+			gsub(/^[ \t]+/, "", $2)
+			if ($2 != "") { print $2; exit }
+		}
+	' /proc/cpuinfo 2>/dev/null
+}
+
+read_cpu_cur_freq() {
+	local path
+
+	for path in \
+		/sys/devices/system/cpu/cpufreq/policy*/scaling_cur_freq \
+		/sys/devices/system/cpu/cpufreq/policy*/cpuinfo_cur_freq \
+		/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq \
+		/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq; do
+		[[ -r "${path}" ]] || continue
+		cat "${path}" 2>/dev/null
+		return 0
+	done
+
+	if command -v lscpu >/dev/null 2>&1; then
+		lscpu 2>/dev/null | awk -F: '
+			/^CPU MHz:/ {
+				gsub(/^[ \t]+/, "", $2)
+				if ($2 != "") { printf "%.0f\n", $2 * 1000; exit }
+			}
+		'
+	fi
+}
+
+format_khz_as_clock() {
+	local khz="$1"
+
+	if [[ -z "${khz}" ]]; then
+		printf '%s\n' "unknown"
+		return 0
+	fi
+
+	awk -v khz="${khz}" '
+		BEGIN {
+			if (khz >= 1000000) {
+				printf "%.2f GHz", khz / 1000000
+			} else {
+				printf "%.0f MHz", khz / 1000
+			}
+		}
+	'
+}
+
+read_ddr_cur_freq() {
+	local path
+
+	if [[ -r /sys/class/devfreq/dmc/cur_freq ]]; then
+		cat /sys/class/devfreq/dmc/cur_freq 2>/dev/null
+		return 0
+	fi
+
+	for path in /sys/class/devfreq/*/cur_freq; do
+		[[ -r "${path}" ]] || continue
+		case "${path}" in
+			*dmc*)
+				cat "${path}" 2>/dev/null
+				return 0
+				;;
+		esac
+	done
+
+	if [[ -d /sys/kernel/debug ]] && [[ ! -r /sys/kernel/debug/clk/clk_summary ]]; then
+		mount -t debugfs none /sys/kernel/debug >/dev/null 2>&1 || true
+	fi
+
+	if [[ -r /sys/kernel/debug/clk/clk_summary ]]; then
+		awk '$1 == "clk_ddrc" { print $4; exit }' /sys/kernel/debug/clk/clk_summary
+	fi
+}
+
+format_hz_as_ddr_clock() {
+	local hz="$1"
+
+	if [[ -z "${hz}" ]]; then
+		printf '%s\n' "unknown"
+		return 0
+	fi
+
+	awk -v hz="${hz}" 'BEGIN { printf "%.0f MHz", hz / 1000000 }'
+}
+
+read_ram_freq_display() {
+	local ddr_cur overlays
+
+	ddr_cur="$(read_ddr_cur_freq)"
+	if [[ "${ddr_cur}" =~ ^[0-9]+$ ]]; then
+		format_hz_as_ddr_clock "${ddr_cur}"
+		return 0
+	fi
+
+	if [[ -r /boot/armbianEnv.txt ]]; then
+		overlays="$(awk -F= '$1=="overlays"{print $2; exit}' /boot/armbianEnv.txt)"
+		if [[ "${overlays}" =~ ddr3-([0-9]+) ]]; then
+			printf '%s MHz\n' "${BASH_REMATCH[1]}"
+			return 0
+		fi
+		if [[ "${overlays}" =~ dmc-disabled ]]; then
+			printf '%s\n' "disabled"
+			return 0
+		fi
+	fi
+
+	printf '%s\n' "dynamic"
+}
+
+visible_length() {
+	local text="$1"
+
+	printf '%b' "${text}" \
+		| sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' \
+		| wc -m \
+		| awk '{print $1}'
+}
+
+print_pair_line() {
+	local left_label="$1" left_value="$2" right_label="$3" right_value="$4"
+	local left_text right_text left_width pad
+
+	left_text="$(printf ' %-14s %b' "${left_label}:" "${left_value}")"
+	if [[ -z "${right_label}" ]]; then
+		printf '%b\n' "${left_text}"
+		return 0
+	fi
+
+	right_text="$(printf ' %-14s %b' "${right_label}:" "${right_value}")"
+	left_width="$(visible_length "${left_text}")"
+	pad=$((34 - left_width))
+	(( pad < 2 )) && pad=2
+	printf '%b%*s%b\n' "${left_text}" "${pad}" '' "${right_text}"
+}
+
+colorize_metric() {
+	local value="$1" red_limit="$2" unit="${3:-}"
+
+	if awk -v v="$value" -v r="$red_limit" 'BEGIN { exit !((v + 0) > (r + 0)) }'; then
+		printf '\x1B[0;91m%s%s\x1B[0m' "$value" "$unit"
+	else
+		printf '\x1B[0;92m%s%s\x1B[0m' "$value" "$unit"
+	fi
+}
+
 display() {
 	# $1=name $2=value $3=red_limit $4=min_show_limit $5=unit $6=after
 	# Battery uses inverse threshold (lower is worse)
@@ -93,6 +252,9 @@ batteryinfo
 storage_info
 getboardtemp
 critical_load=80
+cpu_label="$(read_cpu_label)"
+cpu_freq="$(format_khz_as_clock "$(read_cpu_cur_freq)")"
+ram_freq="$(read_ram_freq_display)"
 
 # Uptime, users, and load
 users="$(who 2>/dev/null | wc -l | tr -d ' ')"
@@ -117,6 +279,12 @@ format_uptime() {
 time="$(format_uptime)"
 
 cpucount="$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)"
+if [[ "${cpu_freq}" == "unknown" ]]; then
+	cpu_summary="${cpu_label:-unknown}"
+else
+	cpu_summary="${cpu_label:-unknown} @ ${cpucount} x ${cpu_freq}"
+fi
+
 read -r load1 _ < /proc/loadavg
 [[ "$load1" == 0.0* ]] && load1="0.10"
 load="$(awk -v l="$load1" -v c="$cpucount" 'BEGIN{printf("%.0f",(l/c)*100)}')"
@@ -150,10 +318,8 @@ if [[ -e /run/armbian-motd/.after_header.printed ]] \
 fi
 printf "\e[0;90m Performance:  \x1B[0m\n\n"
 
-display " Load"           "${load%% *}" "$critical_load" "0" "%" ""
-printf " Uptime:         \x1B[92m%s\x1B[0m\t" "${time:-unknown}"
-display " Local users"   "${users:-0}" "3" "2" "" ""
-echo ""
+print_pair_line "CPU" "\x1B[92m${cpu_summary}\x1B[0m" "" ""
+print_pair_line "Load" "\x1B[92m${load%% *}%\x1B[0m" "Uptime" "\x1B[92m${time:-unknown}\x1B[0m"
 
 # Humanize totals
 if (( mem_total_mb > 1000 )); then
@@ -168,9 +334,7 @@ else
 	swap_total_disp="${swap_total_mb}M"
 fi
 
-display " Memory usage"   "$memory_usage" "70" "0" "%" " of ${memory_total}"
-display " Zram usage"     "$swap_usage" "75" "0" "%" " of ${swap_total_disp}"
-echo ""
+print_pair_line "Memory usage" "\x1B[92m${memory_usage}%\x1B[0m of ${memory_total}" "RAM freq" "\x1B[92m${ram_freq}\x1B[0m"
 
 # Temperatures & root usage
 # Apply optional CPU temp offset if both numeric
@@ -184,17 +348,17 @@ amb_temp_int=$(printf '%.0f\n' "${amb_temp%%.*}" 2>/dev/null || echo "0")
 
 display " CPU temp" "$cpu_temp_int" "$CPU_TEMP_LIMIT" "0" "°C" ""
 display " Ambient temp" "$amb_temp_int" "$AMB_TEMP_LIMIT" "0" "°C" ""
-display " Usage of /"     "${root_usage:-0}" "90" "1" "%" " of ${root_total} ${overlay_root}"
 
 if command -v overlayroot-chroot >/dev/null 2>&1 && findmnt -k /media/root-ro | tail -1 | grep -qw /media/root-ro; then
 	echo -ne "\x1B[91m(read only rootfs)\x1B[0m"
 fi
-echo ""
 
 # Optional secondary storage / disk temp / battery
 a=0
-display " storage /"      "${storage_usage:-0}" "90" "1" "%" " of ${storage_total:-}" ; a=$((a+$?))
-display " storage temp"   "${storage_temp:-0}" "$HDD_TEMP_LIMIT" "0" "°C" ""      ; a=$((a+$?))
+if [[ -n "${storage_total:-}" ]]; then
+	print_pair_line "Storage /" "$(colorize_metric "${storage_usage:-0}" "90" "%") of ${storage_total}"
+fi
+display " Storage temp"   "${storage_temp:-0}" "$HDD_TEMP_LIMIT" "0" "°C" ""      ; a=$((a+$?))
 display " Battery"        "${battery_percent:-0}" "20" "1" "%" "${status_battery_text:-}" ; a=$((a+$?))
 (( a > 0 )) && echo ""
 
