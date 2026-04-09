@@ -16,7 +16,7 @@ c862de0d4198bf95a6c7a84d9f00c75d  etc/apt/apt.conf.d/81-armbian-no-languages
 f97c3ebf208239e2648f82de502b2f1c  etc/cron.d/armbian-check-battery
 edaed38a2bb83eb2f16f72340b7a147f  etc/cron.d/armbian-truncate-logs
 53ad4bf9ccb405bb956610c48680da3c  etc/cron.d/armbian-updates
-1675f0e99f33b596509cc8eb03a3493c  etc/cron.daily/armbian-quotes
+6a9fd03423f546eb6634ded8acb02c73  etc/cron.daily/armbian-quotes
 5367a4cadda8671c1dd97e9adda5ec94  etc/cron.daily/armbian-ram-logging
 8ec4f3c5894b249f6e0fb64acc4cfde7  etc/default/armbian-firstrun.dpkg-dist
 464ed94573d9e569504e6a8b22d72ace  etc/default/armbian-motd.dpkg-dist

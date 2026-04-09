@@ -1,7 +1,5 @@
 #!/bin/bash
 
-if [ -s /etc/update-motd.d/quotes.txt ]; then
-	exit 0
-fi
-
-curl --max-time 2 -L -s -o "/etc/update-motd.d/quotes.txt" "https://github.armbian.com/quotes.txt"
+# Keep local MOTD tips fully package-managed for RK3128 images.
+# This package must not pull quotes from Armbian infrastructure.
+exit 0

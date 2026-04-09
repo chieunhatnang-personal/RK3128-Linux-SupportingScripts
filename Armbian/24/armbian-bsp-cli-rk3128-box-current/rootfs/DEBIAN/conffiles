@@ -1,4 +1,3 @@
 /usr/lib/armbian/armbian-apt-updates
 /etc/X11/xorg.conf.d/01-armbian-defaults.conf
 /etc/hostname
-/etc/update-motd.d/quotes.txt
