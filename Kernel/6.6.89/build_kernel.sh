@@ -241,6 +241,45 @@ copy_new_deb_packages() {
   done
 }
 
+mirror_modules_into_bundle_dir() {
+  local modules_root="${1}"
+  local bundle_dir="${2}"
+  local description="${3}"
+  local -a modules=()
+  local module
+  local rel_path
+  local dest_path
+
+  if [[ ! -d "${modules_root}" ]]; then
+    echo "[*] No ${description} module directory found at ${modules_root}"
+    return 0
+  fi
+
+  while IFS= read -r module; do
+    modules+=("${module}")
+  done < <(find "${modules_root}" \
+    \( -path "${bundle_dir}" -o -path "${bundle_dir}/*" \) -prune -o \
+    -type f -name '*.ko' -print | sort)
+
+  if [[ ${#modules[@]} -eq 0 ]]; then
+    echo "[*] No ${description} modules found under ${modules_root}"
+    return 0
+  fi
+
+  mkdir -p "${bundle_dir}"
+
+  echo "[*] Mirroring ${description} modules into ${bundle_dir}"
+  for module in "${modules[@]}"; do
+    rel_path="${module#${modules_root}/}"
+    if [[ "${rel_path}" == rkwifi/* ]]; then
+      rel_path="${rel_path#rkwifi/}"
+    fi
+    dest_path="${bundle_dir}/${rel_path}"
+    mkdir -p "$(dirname "${dest_path}")"
+    cp -av "${module}" "${dest_path}"
+  done
+}
+
 have_command() {
   command -v "${1}" >/dev/null 2>&1
 }
@@ -458,8 +497,8 @@ ZRAM_CONFIG="$(grep '^CONFIG_ZRAM=' "${BUILD_DIR}/.config" || true)"
 ZIMAGE_PATH="${BUILD_DIR}/arch/arm/boot/zImage"
 ZRAM_KO_PATH="${BUILD_DIR}/drivers/block/zram/zram.ko"
 STAGED_ZRAM_KO_PATH="${MODULES_RELEASE_DIR}/kernel/drivers/block/zram/zram.ko"
-ESP8089_KO_PATH="${BUILD_DIR}/drivers/net/wireless/rockchip_wlan/rkwifi/esp8089/esp8089.ko"
-ESP8089_KO_SOURCE_PATH="${KERNEL_DIR}/drivers/net/wireless/rockchip_wlan/rkwifi/esp8089/esp8089.ko"
+ROCKCHIP_WLAN_MODULES_DIR="${MODULES_RELEASE_DIR}/kernel/drivers/net/wireless/rockchip_wlan"
+ROCKCHIP_WLAN_RKWIFI_DIR="${ROCKCHIP_WLAN_MODULES_DIR}/rkwifi"
 
 if [[ ! -f "${ZIMAGE_PATH}" ]]; then
   echo "ERROR: zImage not found: ${ZIMAGE_PATH}"
@@ -472,9 +511,11 @@ cp -av "${BUILD_DIR}/.config" "${OUT_DIR}/kernel.config"
 printf '%s\n' "${KERNEL_RELEASE}" > "${OUT_DIR}/kernel.release"
 
 echo "[*] Installing modules into ${MODULES_STAGING_DIR}"
-rm -rf "${MODULES_RELEASE_DIR}"
-rm -rf "${OUT_MODULES_RELEASE_DIR}"
+rm -rf "${MODULES_STAGING_DIR}"
+rm -rf "${OUT_DIR}/lib/modules"
 make O="${BUILD_DIR}" INSTALL_MOD_PATH="${MODULES_STAGING_DIR}" modules_install
+
+mirror_modules_into_bundle_dir "${ROCKCHIP_WLAN_MODULES_DIR}" "${ROCKCHIP_WLAN_RKWIFI_DIR}" "Rockchip WLAN"
 
 echo "[*] Copying installed modules into ${OUT_DIR}/lib/modules"
 mkdir -p "${OUT_DIR}/lib/modules"
@@ -499,13 +540,6 @@ fi
 
 cp -av "${DTB_PATH}" "${OUT_DIR}/"
 
-if [[ -f "${ESP8089_KO_PATH}" ]]; then
-  cp -av "${ESP8089_KO_PATH}" "${OUT_DIR}/"
-  cp -av "${ESP8089_KO_PATH}" "${ESP8089_KO_SOURCE_PATH}"
-else
-  echo "WARN: ESP8089 module not found: ${ESP8089_KO_PATH}"
-fi
-
 cat > "${OUT_DIR}/DEPLOYMENT.txt" <<EOF
 Kernel release: ${KERNEL_RELEASE}
 ZRAM config: ${ZRAM_CONFIG:-CONFIG_ZRAM is not set}
@@ -518,6 +552,9 @@ A second staged copy is also kept at:
 
 Overlay files are copied to:
   ${OVERLAY_OUT_DIR}
+
+Rockchip WLAN modules are additionally copied to:
+  ${ROCKCHIP_WLAN_RKWIFI_DIR}
 
 Copy the base DTB to /boot/dtb/ and the overlay .dtbo files to /boot/dtb/overlay/.
 Then set armbianEnv.txt, for example:
@@ -541,6 +578,6 @@ echo "    - ${OUT_DIR}/kernel.config"
 echo "    - ${OUT_DIR}/kernel.release"
 echo "    - ${MODULES_RELEASE_DIR}"
 echo "    - ${OUT_MODULES_RELEASE_DIR}"
+echo "    - ${ROCKCHIP_WLAN_RKWIFI_DIR}/*.ko (if built)"
 echo "    - ${OUT_DIR}/DEPLOYMENT.txt"
 echo "    - ${OUT_DIR}/zram.ko (if built as module)"
-echo "    - ${OUT_DIR}/esp8089.ko (if built)"
