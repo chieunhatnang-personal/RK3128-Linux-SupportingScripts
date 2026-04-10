@@ -19,8 +19,9 @@ usage() {
   echo
   echo "Behavior:"
   echo "  - No argument: build zImage/zImage.gz, DTB, overlays, and modules into out/."
-  echo "  - deb: build Debian kernel packages with bindeb-pkg and copy the generated"
-  echo "    .deb files into out/."
+  echo "  - deb: build the same kernel artifacts once, then assemble fast local"
+  echo "    linux-image/linux-headers/linux-libc-dev Debian packages from those"
+  echo "    outputs. The linux-image package includes DTB, overlays, and modules."
   echo "  - The script looks in ${SCRIPT_DIR} for one directory whose name contains '3128'"
   echo "    and that looks like a kernel source root."
   echo "  - build/ and out/ are created next to the resolved kernel directory."
@@ -222,16 +223,11 @@ build_dtbo_overlays() {
 }
 
 copy_new_deb_packages() {
-  local stamp_file="${1}"
-  local -a deb_packages=()
+  local -a deb_packages=("$@")
   local pkg
 
-  while IFS= read -r pkg; do
-    deb_packages+=("${pkg}")
-  done < <(find "${ROOT_DIR}" -maxdepth 1 -type f -name '*.deb' -newer "${stamp_file}" | sort)
-
   if [[ ${#deb_packages[@]} -eq 0 ]]; then
-    echo "ERROR: bindeb-pkg completed but no new .deb packages were found in ${ROOT_DIR}" >&2
+    echo "ERROR: no .deb packages were produced" >&2
     return 1
   fi
 
@@ -239,6 +235,18 @@ copy_new_deb_packages() {
   for pkg in "${deb_packages[@]}"; do
     cp -av "${pkg}" "${OUT_DIR}/"
   done
+}
+
+refresh_deb_md5sums() {
+  local pkg_root="${1}"
+
+  (
+    cd "${pkg_root}"
+    find . -type f ! -path './DEBIAN/*' -print0 \
+      | sort -z \
+      | xargs -0 md5sum \
+      | sed 's#  \./#  #'
+  ) > "${pkg_root}/DEBIAN/md5sums"
 }
 
 mirror_modules_into_bundle_dir() {
@@ -280,48 +288,23 @@ mirror_modules_into_bundle_dir() {
   done
 }
 
-have_command() {
-  command -v "${1}" >/dev/null 2>&1
-}
+prune_rockchip_wlan_duplicates() {
+  local modules_root="${1}"
+  local rockchip_wlan_dir="${modules_root}/kernel/drivers/net/wireless/rockchip_wlan"
+  local entry
+  local removed=0
 
-prepare_debhelper_shim() {
-  local shim_dir="${1}"
-  local shim_path="${shim_dir}/dh_listpackages"
+  [[ -d "${rockchip_wlan_dir}" ]] || return 0
 
-  mkdir -p "${shim_dir}"
-  cat > "${shim_path}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-awk '/^Package: / { print \$2 }' "${BUILD_DIR}/debian/control"
-EOF
-  chmod +x "${shim_path}"
-}
+  while IFS= read -r entry; do
+    [[ -n "${entry}" ]] || continue
+    rm -rf "${entry}"
+    removed=1
+  done < <(find "${rockchip_wlan_dir}" -mindepth 1 -maxdepth 1 ! -name 'rkwifi' -print | sort)
 
-prepare_deb_toolchain_shims() {
-  local shim_dir="${1}"
-  local shim_path="${shim_dir}/arm-linux-gnueabihf-gcc"
-  local tool
-  local target_name
-  local source_name
-
-  mkdir -p "${shim_dir}"
-  cat > "${shim_path}" <<EOF
-#!/usr/bin/env bash
-if [[ "\${1:-}" == "-dumpmachine" ]]; then
-  printf '%s\n' "arm-linux-gnueabihf"
-  exit 0
-fi
-exec "${CROSS_COMPILE_PREFIX}gcc" "\$@"
-EOF
-  chmod +x "${shim_path}"
-
-  for tool in "${TOOLCHAIN_DIR}"/bin/arm-none-linux-gnueabihf-*; do
-    [[ -e "${tool}" ]] || continue
-    source_name="$(basename "${tool}")"
-    target_name="${source_name/arm-none-linux-gnueabihf-/arm-linux-gnueabihf-}"
-    [[ "${target_name}" == "arm-linux-gnueabihf-gcc" ]] && continue
-    ln -sf "${tool}" "${shim_dir}/${target_name}"
-  done
+  if (( removed )); then
+    echo "[*] Removed duplicate Rockchip WLAN modules outside rkwifi/ under ${rockchip_wlan_dir}"
+  fi
 }
 
 normalize_deb_version_base() {
@@ -341,6 +324,175 @@ next_kernel_build_number() {
   fi
 
   printf '%s\n' "$((current_version + 1))"
+}
+
+deb_host_multiarch() {
+  dpkg-architecture -aarmhf -qDEB_HOST_MULTIARCH 2>/dev/null || printf '%s\n' "arm-linux-gnueabihf"
+}
+
+deb_maintainer() {
+  local name email
+
+  name="$(git config --get user.name 2>/dev/null || true)"
+  email="$(git config --get user.email 2>/dev/null || true)"
+
+  if [[ -n "${name}" && -n "${email}" ]]; then
+    printf '%s <%s>\n' "${name}" "${email}"
+  else
+    printf '%s\n' "rk3128 builder <root@localhost>"
+  fi
+}
+
+write_deb_control() {
+  local pkg_root="${1}"
+  local package_name="${2}"
+  local description="${3}"
+
+  cat > "${pkg_root}/DEBIAN/control" <<EOF
+Package: ${package_name}
+Source: ${KDEB_SOURCENAME}
+Version: ${KDEB_PKGVERSION}
+Architecture: armhf
+Maintainer: ${DEB_MAINTAINER}
+Section: kernel
+Priority: optional
+Homepage: https://www.kernel.org/
+Description: ${description}
+EOF
+}
+
+write_kernel_image_script() {
+  local script_path="${1}"
+  local hook_name="${2}"
+  local run_depmod="${3}"
+
+  cat > "${script_path}" <<EOF
+#!/bin/sh
+
+set -e
+
+export DEB_MAINT_PARAMS="\$*"
+export INITRD=Yes
+EOF
+
+  if [[ "${run_depmod}" == "yes" ]]; then
+    cat >> "${script_path}" <<EOF
+
+depmod ${KERNEL_RELEASE} >/dev/null 2>&1 || true
+EOF
+  fi
+
+  cat >> "${script_path}" <<EOF
+
+test -d /etc/kernel/${hook_name}.d && run-parts --arg="${KERNEL_RELEASE}" --arg="/boot/vmlinuz-${KERNEL_RELEASE}" /etc/kernel/${hook_name}.d
+exit 0
+EOF
+
+  chmod 0755 "${script_path}"
+}
+
+build_linux_image_deb() {
+  local pkg_root="${1}"
+  local image_pkg="${2}"
+  local modules_root="${3}"
+  local package_dtb_dir
+  local package_overlay_dir
+  local modules_pkg_dir
+
+  rm -rf "${pkg_root}"
+  mkdir -p "${pkg_root}/DEBIAN" "${pkg_root}/boot" "${pkg_root}/etc/kernel" "${pkg_root}/lib/modules"
+
+  cp -av "${ZIMAGE_PATH}" "${pkg_root}/boot/vmlinuz-${KERNEL_RELEASE}" >/dev/null
+  cp -av "${SYSTEM_MAP_PATH}" "${pkg_root}/boot/System.map-${KERNEL_RELEASE}" >/dev/null
+  cp -av "${KERNEL_CONFIG_PATH}" "${pkg_root}/boot/config-${KERNEL_RELEASE}" >/dev/null
+
+  package_dtb_dir="${pkg_root}/boot/dtb"
+  package_overlay_dir="${package_dtb_dir}/overlay"
+  mkdir -p "${package_dtb_dir}" "${package_overlay_dir}"
+  cp -av "${DTB_PATH}" "${package_dtb_dir}/${RK_DTS}.dtb" >/dev/null
+
+  if [[ -d "${OVERLAY_OUT_DIR}" ]]; then
+    find "${OVERLAY_OUT_DIR}" -maxdepth 1 -type f -name '*.dtbo' -exec cp -av {} "${package_overlay_dir}/" \; >/dev/null
+  fi
+
+  modules_pkg_dir="${pkg_root}/lib/modules/${KERNEL_RELEASE}"
+  cp -a "${modules_root}/lib/modules/${KERNEL_RELEASE}" "${pkg_root}/lib/modules/"
+  rm -f "${modules_pkg_dir}/build" "${modules_pkg_dir}/source"
+
+  mkdir -p \
+    "${pkg_root}/etc/kernel/postinst.d" \
+    "${pkg_root}/etc/kernel/postrm.d" \
+    "${pkg_root}/etc/kernel/preinst.d" \
+    "${pkg_root}/etc/kernel/prerm.d"
+
+  write_deb_control \
+    "${pkg_root}" \
+    "linux-image-${KERNEL_RELEASE}" \
+    "Linux kernel, version ${KERNEL_RELEASE}
+ This package contains the Linux kernel image, DTB, overlays and modules,
+ version: ${KERNEL_RELEASE}."
+  write_kernel_image_script "${pkg_root}/DEBIAN/preinst" "preinst" "no"
+  write_kernel_image_script "${pkg_root}/DEBIAN/postinst" "postinst" "yes"
+  write_kernel_image_script "${pkg_root}/DEBIAN/prerm" "prerm" "no"
+  write_kernel_image_script "${pkg_root}/DEBIAN/postrm" "postrm" "yes"
+  refresh_deb_md5sums "${pkg_root}"
+  dpkg-deb --root-owner-group --build "${pkg_root}" "${image_pkg}" >/dev/null
+}
+
+build_linux_headers_deb() {
+  local pkg_root="${1}"
+  local headers_pkg="${2}"
+
+  rm -rf "${pkg_root}"
+  mkdir -p "${pkg_root}/DEBIAN"
+
+  (
+    cd "${BUILD_DIR}"
+    srctree="${KERNEL_DIR}" \
+    SRCARCH="${ARCH}" \
+    KCONFIG_CONFIG="${BUILD_DIR}/.config" \
+    "${KERNEL_DIR}/scripts/package/install-extmod-build" "${pkg_root}/usr/src/linux-headers-${KERNEL_RELEASE}"
+  )
+
+  mkdir -p "${pkg_root}/lib/modules/${KERNEL_RELEASE}"
+  ln -s "/usr/src/linux-headers-${KERNEL_RELEASE}" "${pkg_root}/lib/modules/${KERNEL_RELEASE}/build"
+
+  write_deb_control \
+    "${pkg_root}" \
+    "linux-headers-${KERNEL_RELEASE}" \
+    "Linux kernel headers for ${KERNEL_RELEASE} on armhf
+ This package provides kernel header files for ${KERNEL_RELEASE} on armhf.
+ .
+ This is useful for people who need to build external modules."
+  refresh_deb_md5sums "${pkg_root}"
+  dpkg-deb --root-owner-group --build "${pkg_root}" "${headers_pkg}" >/dev/null
+}
+
+build_linux_libc_dev_deb() {
+  local pkg_root="${1}"
+  local libc_pkg="${2}"
+  local multiarch_dir
+
+  rm -rf "${pkg_root}"
+  mkdir -p "${pkg_root}/DEBIAN"
+
+  make O="${BUILD_DIR}" headers >/dev/null
+  make O="${BUILD_DIR}" INSTALL_HDR_PATH="${pkg_root}/usr" headers_install >/dev/null
+
+  multiarch_dir="$(deb_host_multiarch)"
+  mkdir -p "${pkg_root}/usr/include/${multiarch_dir}"
+  if [[ -d "${pkg_root}/usr/include/asm" ]]; then
+    mv "${pkg_root}/usr/include/asm" "${pkg_root}/usr/include/${multiarch_dir}/"
+  fi
+
+  write_deb_control \
+    "${pkg_root}" \
+    "linux-libc-dev" \
+    "Linux support headers for userspace development
+ This package provides userspace headers from the Linux kernel. These headers
+ are used by the installed headers for GNU glibc and other system libraries."
+  refresh_deb_md5sums "${pkg_root}"
+  dpkg-deb --root-owner-group --build "${pkg_root}" "${libc_pkg}" >/dev/null
 }
 
 BUILD_MODE="artifacts"
@@ -399,6 +551,13 @@ export ARCH
 export CROSS_COMPILE="${CROSS_COMPILE_PREFIX}"
 export PATH="${TOOLCHAIN_DIR}/bin:${PATH}"
 
+if git -C "${KERNEL_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  export GIT_DIR
+  export GIT_WORK_TREE
+  GIT_DIR="$(git -C "${KERNEL_DIR}" rev-parse --absolute-git-dir)"
+  GIT_WORK_TREE="$(git -C "${KERNEL_DIR}" rev-parse --show-toplevel)"
+fi
+
 RK_DEFCONFIG="${RK_DEFCONFIG:-rk3128_linux_tvbox_defconfig}"
 RK_DTS="${RK_DTS:-rk3128-linux}"
 DTB_TARGET=""
@@ -442,45 +601,69 @@ echo "[*] make O=${BUILD_DIR} olddefconfig"
 make O="${BUILD_DIR}" olddefconfig
 
 KERNEL_RELEASE="$(make -s O="${BUILD_DIR}" kernelrelease)"
+ZIMAGE_PATH="${BUILD_DIR}/arch/arm/boot/zImage"
+SYSTEM_MAP_PATH="${BUILD_DIR}/System.map"
+KERNEL_CONFIG_PATH="${BUILD_DIR}/.config"
 
 if [[ "${BUILD_MODE}" == "deb" ]]; then
-  DEB_STAMP_FILE="$(mktemp)"
-  DEB_HELPER_SHIM_DIR=""
-  DEB_CC_SHIM_DIR="$(mktemp -d)"
+  DEB_MODULES_STAGING_DIR="$(mktemp -d)"
+  DEB_PACKAGE_STAGING_DIR="$(mktemp -d)"
   DEB_BUILD_NUMBER="$(next_kernel_build_number)"
   DEB_VERSION_BASE="$(normalize_deb_version_base "${KERNEL_RELEASE}")"
-
-  prepare_deb_toolchain_shims "${DEB_CC_SHIM_DIR}"
-  export PATH="${DEB_CC_SHIM_DIR}:${PATH}"
-  export CC="arm-linux-gnueabihf-gcc"
-  export KBUILD_DEBARCH="${KBUILD_DEBARCH:-armhf}"
   export KDEB_SOURCENAME="${KDEB_SOURCENAME:-linux-rk3128}"
   export KDEB_PKGVERSION="${KDEB_PKGVERSION:-${DEB_VERSION_BASE}-${DEB_BUILD_NUMBER}}"
+  DEB_MAINTAINER="$(deb_maintainer)"
+  IMAGE_DEB_PATH="${ROOT_DIR}/linux-image-${KERNEL_RELEASE}_${KDEB_PKGVERSION}_armhf.deb"
+  HEADERS_DEB_PATH="${ROOT_DIR}/linux-headers-${KERNEL_RELEASE}_${KDEB_PKGVERSION}_armhf.deb"
+  LIBC_DEB_PATH="${ROOT_DIR}/linux-libc-dev_${KDEB_PKGVERSION}_armhf.deb"
 
   echo "[*] Debian source : ${KDEB_SOURCENAME}"
   echo "[*] Debian version: ${KDEB_PKGVERSION}"
+  echo "[*] Maintainer    : ${DEB_MAINTAINER}"
 
-  if ! have_command dh_listpackages; then
-    DEB_HELPER_SHIM_DIR="$(mktemp -d)"
-    prepare_debhelper_shim "${DEB_HELPER_SHIM_DIR}"
-    export PATH="${DEB_HELPER_SHIM_DIR}:${PATH}"
-    export DPKG_FLAGS="${DPKG_FLAGS:-} -d"
-    echo "[*] debhelper is not installed; using local dh_listpackages shim and forcing dpkg-buildpackage -d"
-  fi
+  trap 'rm -rf "${DEB_MODULES_STAGING_DIR}" "${DEB_PACKAGE_STAGING_DIR}"' EXIT
 
-  trap 'rm -f "${DEB_STAMP_FILE}"; rm -rf "${DEB_CC_SHIM_DIR}"; if [[ -n "${DEB_HELPER_SHIM_DIR}" ]]; then rm -rf "${DEB_HELPER_SHIM_DIR}"; fi' EXIT
+  echo "[*] Building zImage + ${DTB_TARGET} + modules for Debian packaging"
+  make -j"${JOBS}" O="${BUILD_DIR}" zImage "${DTB_TARGET}" modules
 
-  echo "[*] Building Debian packages with bindeb-pkg"
-  make -j"${JOBS}" O="${BUILD_DIR}" CROSS_COMPILE="arm-linux-gnueabihf-" bindeb-pkg
+  build_dtbo_overlays
+
+  echo "[*] Installing modules into ${DEB_MODULES_STAGING_DIR} for Debian packaging"
+  rm -rf "${DEB_MODULES_STAGING_DIR}"
+  mkdir -p "${DEB_MODULES_STAGING_DIR}"
+  make O="${BUILD_DIR}" INSTALL_MOD_PATH="${DEB_MODULES_STAGING_DIR}" modules_install
+  mirror_modules_into_bundle_dir \
+    "${DEB_MODULES_STAGING_DIR}/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/wireless/rockchip_wlan" \
+    "${DEB_MODULES_STAGING_DIR}/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/wireless/rockchip_wlan/rkwifi" \
+    "Rockchip WLAN"
+  prune_rockchip_wlan_duplicates \
+    "${DEB_MODULES_STAGING_DIR}/lib/modules/${KERNEL_RELEASE}"
+
+  rm -f "${IMAGE_DEB_PATH}" "${HEADERS_DEB_PATH}" "${LIBC_DEB_PATH}"
+
+  build_linux_image_deb \
+    "${DEB_PACKAGE_STAGING_DIR}/linux-image" \
+    "${IMAGE_DEB_PATH}" \
+    "${DEB_MODULES_STAGING_DIR}"
+  build_linux_headers_deb \
+    "${DEB_PACKAGE_STAGING_DIR}/linux-headers" \
+    "${HEADERS_DEB_PATH}"
+  build_linux_libc_dev_deb \
+    "${DEB_PACKAGE_STAGING_DIR}/linux-libc-dev" \
+    "${LIBC_DEB_PATH}"
 
   cp -av "${BUILD_DIR}/.config" "${OUT_DIR}/kernel.config"
   printf '%s\n' "${KERNEL_RELEASE}" > "${OUT_DIR}/kernel.release"
-  copy_new_deb_packages "${DEB_STAMP_FILE}"
+  copy_new_deb_packages "${IMAGE_DEB_PATH}" "${HEADERS_DEB_PATH}" "${LIBC_DEB_PATH}"
 
   echo "[*] Done:"
   echo "    - ${OUT_DIR}/*.deb"
   echo "    - ${OUT_DIR}/kernel.config"
   echo "    - ${OUT_DIR}/kernel.release"
+  echo "    - linux-image package now contains /boot/dtb/${RK_DTS}.dtb"
+  echo "    - linux-image package now contains /boot/dtb/overlay/*.dtbo"
+  echo "    - linux-image package now contains runtime modules only (no build/source symlink)"
+  echo "    - linux-headers package now owns /lib/modules/${KERNEL_RELEASE}/build"
   exit 0
 fi
 
@@ -494,7 +677,6 @@ MODULES_RELEASE_DIR="${MODULES_STAGING_DIR}/lib/modules/${KERNEL_RELEASE}"
 OUT_MODULES_RELEASE_DIR="${OUT_DIR}/lib/modules/${KERNEL_RELEASE}"
 ZRAM_CONFIG="$(grep '^CONFIG_ZRAM=' "${BUILD_DIR}/.config" || true)"
 
-ZIMAGE_PATH="${BUILD_DIR}/arch/arm/boot/zImage"
 ZRAM_KO_PATH="${BUILD_DIR}/drivers/block/zram/zram.ko"
 STAGED_ZRAM_KO_PATH="${MODULES_RELEASE_DIR}/kernel/drivers/block/zram/zram.ko"
 ROCKCHIP_WLAN_MODULES_DIR="${MODULES_RELEASE_DIR}/kernel/drivers/net/wireless/rockchip_wlan"
@@ -516,6 +698,7 @@ rm -rf "${OUT_DIR}/lib/modules"
 make O="${BUILD_DIR}" INSTALL_MOD_PATH="${MODULES_STAGING_DIR}" modules_install
 
 mirror_modules_into_bundle_dir "${ROCKCHIP_WLAN_MODULES_DIR}" "${ROCKCHIP_WLAN_RKWIFI_DIR}" "Rockchip WLAN"
+prune_rockchip_wlan_duplicates "${MODULES_RELEASE_DIR}"
 
 echo "[*] Copying installed modules into ${OUT_DIR}/lib/modules"
 mkdir -p "${OUT_DIR}/lib/modules"
