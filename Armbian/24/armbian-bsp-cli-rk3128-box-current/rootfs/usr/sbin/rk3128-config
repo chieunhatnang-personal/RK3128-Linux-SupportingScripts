@@ -6,7 +6,7 @@ ARMBIAN_ENV_TXT="/boot/armbianEnv.txt"
 DEVICE_TREE_OVERLAY_PATH="/boot/dtb/overlay"
 WIFI_STATE_CONF="/etc/default/rk3128-wifi"
 WIFI_LOADER_SERVICE="/etc/systemd/system/wifi-driver-loader.service"
-WIFI_LOADER_WANTS_DIR="/etc/systemd/system/network-pre.target.wants"
+WIFI_LOADER_WANTS_DIR="/etc/systemd/system/multi-user.target.wants"
 WIFI_LOADER_SCRIPT="/usr/local/sbin/wifi-driver-loader"
 LEGACY_WIFI_LOADER_SERVICE="/etc/systemd/system/rk3128-wifi-loader.service"
 LEGACY_WIFI_LOADER_SCRIPT="/usr/local/sbin/rk3128-wifi-loader"
@@ -211,8 +211,9 @@ install_wifi_loader() {
 set -eu
 
 STATE_CONF="/etc/default/rk3128-wifi"
-WAIT_RETRIES=12
-LOAD_RETRIES=8
+WAIT_RETRIES=30
+LOAD_RETRIES=20
+LOAD_DELAY=2
 
 read_state_value() {
     key="$1"
@@ -244,6 +245,23 @@ wait_for_wifi_platform() {
     return 0
 }
 
+have_module_loaded() {
+    module_name="$1"
+    module_name="$(printf '%s\n' "${module_name}" | tr '-' '_')"
+    grep -Eq "^${module_name}[[:space:]]" /proc/modules 2>/dev/null
+}
+
+remove_conflicting_modules() {
+    selected_module="$1"
+
+    for module_name in esp8089 8189es 8189etv 8189fs ssv6051 ssv6x5x; do
+        [ "${module_name}" = "${selected_module}" ] && continue
+        if have_module_loaded "${module_name}"; then
+            modprobe -r "${module_name}" >/dev/null 2>&1 || true
+        fi
+    done
+}
+
 if [ ! -r "${STATE_CONF}" ]; then
     exit 0
 fi
@@ -252,6 +270,12 @@ wifi_module="$(read_state_value WIFI_MODULE)"
 [ -n "${wifi_module}" ] || exit 0
 
 wait_for_wifi_platform
+sleep "${LOAD_DELAY}"
+remove_conflicting_modules "${wifi_module}"
+
+if have_module_loaded "${wifi_module}"; then
+    exit 0
+fi
 
 tries=0
 while [ "${tries}" -lt "${LOAD_RETRIES}" ]; do
@@ -259,7 +283,7 @@ while [ "${tries}" -lt "${LOAD_RETRIES}" ]; do
         exit 0
     fi
 
-    sleep 1
+    sleep "${LOAD_DELAY}"
     tries=$((tries + 1))
 done
 
@@ -274,13 +298,13 @@ EOF
 [Unit]
 Description=Load the selected RK3128 Wi-Fi driver
 ConditionPathExists=${WIFI_STATE_CONF}
-After=systemd-modules-load.service systemd-udev-settle.service
+After=local-fs.target systemd-modules-load.service systemd-udev-settle.service NetworkManager.service wpa_supplicant.service
 Wants=systemd-udev-settle.service
-Before=NetworkManager.service wpa_supplicant.service network-pre.target
 
 [Service]
 Type=oneshot
 ExecStart=${WIFI_LOADER_SCRIPT}
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -292,6 +316,30 @@ EOF
     mkdir -p "${WIFI_LOADER_WANTS_DIR}"
     ln -sf "${WIFI_LOADER_SERVICE}" "${WIFI_LOADER_WANTS_DIR}/${service_name}"
     rm -f "${LEGACY_WIFI_LOADER_SCRIPT}" "${LEGACY_WIFI_LOADER_SERVICE}" \
+        "${WIFI_LOADER_WANTS_DIR}/${legacy_service_name}"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable "${service_name}" >/dev/null 2>&1 || true
+    fi
+}
+
+deactivate_wifi_loader() {
+    local service_name
+    local legacy_service_name
+
+    service_name="$(basename "${WIFI_LOADER_SERVICE}")"
+    legacy_service_name="$(basename "${LEGACY_WIFI_LOADER_SERVICE}")"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now "${service_name}" >/dev/null 2>&1 || true
+        systemctl disable --now "${legacy_service_name}" >/dev/null 2>&1 || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+
+    rm -f "${WIFI_LOADER_SCRIPT}" "${WIFI_LOADER_SERVICE}" \
+        "${LEGACY_WIFI_LOADER_SCRIPT}" "${LEGACY_WIFI_LOADER_SERVICE}" \
+        "${WIFI_LOADER_WANTS_DIR}/${service_name}" \
         "${WIFI_LOADER_WANTS_DIR}/${legacy_service_name}"
 }
 
@@ -618,6 +666,7 @@ apply_wifi_choice() {
         install_wifi_loader
     else
         rm -f "${WIFI_STATE_CONF}"
+        deactivate_wifi_loader
     fi
     write_wifi_blacklist "${wifi_key}" "${preferred_module}"
 
@@ -629,14 +678,16 @@ apply_wifi_choice() {
     fi
     if [ -n "${preferred_module}" ]; then
         message="${message}\nDriver Module on Next Boot: ${preferred_module}"
-        message="${message}\nDriver will be loaded by ${WIFI_LOADER_SERVICE} using ${WIFI_STATE_CONF} after restart."
+        message="${message}\nDriver loader: ${WIFI_LOADER_SERVICE}"
+        message="${message}\nThe driver will be loaded on the next boot after the DT overlay is active."
+        message="${message}\nA reboot is required before Wi-Fi can work."
         message="${message}\nOther supported onboard Wi-Fi drivers are blacklisted in ${BLACKLIST_MODPROBE_CONF}."
     elif [ "${wifi_key}" = "disabled" ]; then
         message="${message}\nDriver Module: none forced"
         message="${message}\nAll supported onboard Wi-Fi drivers are blacklisted in ${BLACKLIST_MODPROBE_CONF}."
     else
         message="${message}\nDriver Module: none forced"
-        message="${message}\nAutomatic driver probing will happen after restart."
+        message="${message}\nAutomatic driver probing will happen after reboot."
         message="${message}\nNo Wi-Fi blacklist override is active."
     fi
 
@@ -1354,7 +1405,7 @@ Notes
 - The script installs ${WIFI_LOADER_SERVICE} to load the selected Wi-Fi driver later in boot
 - The script writes ${BLACKLIST_MODPROBE_CONF} to block unsupported onboard Wi-Fi drivers
 - Legacy ${LEGACY_MODULES_LOAD_CONF} is removed to avoid early boot module loading
-- Wi-Fi modules are not modprobed immediately because the new DT overlay is only active after reboot
+- Wi-Fi modules are only loaded on boot because the new DT overlay is only active after reboot
 - CPU max/governor options are applied immediately through sysfs and also saved to ${CPUFREQUTILS_CONF}
 - DDR changes apply after reboot
 - A reboot is recommended after changes"
