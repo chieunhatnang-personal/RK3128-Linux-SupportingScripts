@@ -106,7 +106,7 @@ aa1c33c25f903e567dac85a392e15cc5  usr/lib/armbian/armbian-hardware-optimization
 2c36cca8da0b90e20e293ffa7733a37f  usr/local/bin/hdmi-hotplug
 3865648ab027bdc20616f301841084d1  usr/sbin/armbian-add-overlay
 5b77f13aeca3322a40f95408a1032c12  usr/sbin/ddbr
-149a22c9184970674affa8926893b37e  usr/sbin/rk3128-config
+349d06e58894d30873b61f96406bd612  usr/sbin/rk3128-config
 2e983daa6f340a335654824f6ef90999  usr/share/armbian/armbian-user-icon.png
 e8cb2bee01c9471c1cf244672842a6f8  usr/share/armbian/armbianEnv.txt
 e54699a4917c59d1772de22adda12503  usr/share/armbian/boot.cmd
