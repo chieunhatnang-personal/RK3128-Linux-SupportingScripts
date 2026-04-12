@@ -34,6 +34,7 @@ declare -A WIFI_OVERLAY_CANDIDATES
 declare -A UART_LABELS
 declare -A UART_OVERLAY_CANDIDATES
 declare -A SDCARD_LABELS
+declare -A FLASH_LABELS
 declare -A OTG_LABELS
 declare -A OTG_OVERLAY_CANDIDATES
 declare -A DISPLAY_MODES
@@ -74,6 +75,12 @@ UART_OVERLAY_CANDIDATES["disabled"]=""
 SDCARD_LABELS["enabled"]="Enabled"
 SDCARD_LABELS["disabled"]="Disabled"
 SDCARD_ENABLE_OVERLAY="sdcard-enabled"
+
+FLASH_LABELS["auto"]="Automatic"
+FLASH_LABELS["emmc"]="eMMC Enabled"
+FLASH_LABELS["nand"]="NAND Enabled"
+EMMC_ENABLE_OVERLAY="emmc-enabled"
+NAND_ENABLE_OVERLAY="nand"
 
 OTG_LABELS["host"]="Host"
 OTG_LABELS["peripheral"]="Peripheral"
@@ -198,6 +205,21 @@ EOF
     mv "${temp_file}" "${WIFI_STATE_CONF}"
 }
 
+cleanup_wifi_loader_wants() {
+    local service_name
+    local legacy_service_name
+    local wants_dir
+
+    service_name="$(basename "${WIFI_LOADER_SERVICE}")"
+    legacy_service_name="$(basename "${LEGACY_WIFI_LOADER_SERVICE}")"
+
+    for wants_dir in \
+        "/etc/systemd/system/network-pre.target.wants" \
+        "/etc/systemd/system/multi-user.target.wants"; do
+        rm -f "${wants_dir}/${service_name}" "${wants_dir}/${legacy_service_name}"
+    done
+}
+
 install_wifi_loader() {
     local temp_file
     local service_name
@@ -314,6 +336,7 @@ EOF
     service_name="$(basename "${WIFI_LOADER_SERVICE}")"
     legacy_service_name="$(basename "${LEGACY_WIFI_LOADER_SERVICE}")"
     mkdir -p "${WIFI_LOADER_WANTS_DIR}"
+    cleanup_wifi_loader_wants
     ln -sf "${WIFI_LOADER_SERVICE}" "${WIFI_LOADER_WANTS_DIR}/${service_name}"
     rm -f "${LEGACY_WIFI_LOADER_SCRIPT}" "${LEGACY_WIFI_LOADER_SERVICE}" \
         "${WIFI_LOADER_WANTS_DIR}/${legacy_service_name}"
@@ -337,29 +360,28 @@ deactivate_wifi_loader() {
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
 
+    cleanup_wifi_loader_wants
     rm -f "${WIFI_LOADER_SCRIPT}" "${WIFI_LOADER_SERVICE}" \
-        "${LEGACY_WIFI_LOADER_SCRIPT}" "${LEGACY_WIFI_LOADER_SERVICE}" \
-        "${WIFI_LOADER_WANTS_DIR}/${service_name}" \
-        "${WIFI_LOADER_WANTS_DIR}/${legacy_service_name}"
+        "${LEGACY_WIFI_LOADER_SCRIPT}" "${LEGACY_WIFI_LOADER_SERVICE}"
 }
 
 dialog_menu() {
     local prompt="$1"
     shift
     "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
-        --cr-wrap --no-collapse \
+        --colors --cr-wrap --no-collapse \
         --menu "${prompt}" "${DIALOG_MENU_HEIGHT}" "${DIALOG_MENU_WIDTH}" "${DIALOG_MENU_LIST_HEIGHT}" "$@" 2>&1 >/dev/tty
 }
 
 dialog_msg() {
     "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
-        --cr-wrap --no-collapse \
+        --colors --cr-wrap --no-collapse \
         --msgbox "$1" "${DIALOG_MSG_HEIGHT}" "${DIALOG_MSG_WIDTH}"
 }
 
 dialog_yesno() {
     "${DIALOG_BIN}" --clear --backtitle "${BACKTITLE}" --title "${TITLE}" \
-        --cr-wrap --no-collapse \
+        --colors --cr-wrap --no-collapse \
         --yesno "$1" "${DIALOG_MSG_HEIGHT}" "${DIALOG_MSG_WIDTH}"
 }
 
@@ -558,6 +580,21 @@ write_overlays_without_otg() {
         if ! is_known_otg_overlay "${overlay}"; then
             filtered+=("${overlay}")
         fi
+    done
+
+    printf '%s\n' "${filtered[*]:-}"
+}
+
+write_overlays_without_flash() {
+    local current filtered overlay
+    current="$(read_overlays)"
+    filtered=()
+
+    for overlay in ${current}; do
+        if [ "${overlay}" = "${EMMC_ENABLE_OVERLAY}" ] || [ "${overlay}" = "${NAND_ENABLE_OVERLAY}" ]; then
+            continue
+        fi
+        filtered+=("${overlay}")
     done
 
     printf '%s\n' "${filtered[*]:-}"
@@ -791,6 +828,54 @@ apply_sdcard_choice() {
     dialog_msg "${message}"
 }
 
+apply_flash_choice() {
+    local flash_key="$1"
+    local current_overlays selected_overlay message
+    local -a overlays_to_write=()
+
+    current_overlays="$(write_overlays_without_flash)"
+    if [ -n "${current_overlays}" ]; then
+        for selected_overlay in ${current_overlays}; do
+            overlays_to_write+=("${selected_overlay}")
+        done
+    fi
+
+    selected_overlay=""
+    case "${flash_key}" in
+        emmc)
+            selected_overlay="${EMMC_ENABLE_OVERLAY}"
+            ;;
+        nand)
+            selected_overlay="${NAND_ENABLE_OVERLAY}"
+            ;;
+    esac
+
+    if [ -n "${selected_overlay}" ]; then
+        if overlay_exists "${selected_overlay}"; then
+            overlays_to_write+=("${selected_overlay}")
+        else
+            dialog_msg "Missing overlay ${selected_overlay}.\nExpected file:\n${DEVICE_TREE_OVERLAY_PATH}/${overlay_prefix:-rk3128}-${selected_overlay}.dtbo"
+            return 1
+        fi
+    fi
+
+    set_env_value "overlays" "${overlays_to_write[*]:-}"
+
+    message="Internal flash access set to ${FLASH_LABELS[$flash_key]}."
+    if [ -n "${selected_overlay}" ]; then
+        message="${message}\nOverlay: ${selected_overlay}"
+    else
+        message="${message}\nOverlay: none"
+    fi
+    if [ "${flash_key}" = "auto" ]; then
+        message="${message}\nboot.cmd will manage NAND/eMMC automatically from the boot device."
+    else
+        message="${message}\nThe opposite flash overlay was removed automatically."
+        message="${message}\nUse this only when booting from USB and you need manual access to internal flash."
+    fi
+    dialog_msg "${message}"
+}
+
 apply_otg_choice() {
     local otg_key="$1"
     local current_overlays selected_overlay message
@@ -975,6 +1060,7 @@ $(format_info_line "CPU / Gov" "$(current_cpu_freq_short_label) / $(current_cpu_
 $(format_info_line "DDR" "$(current_ddr_clock_short_label)")
 $(format_info_line "SD / UART" "$(current_sdcard_label) / $(current_uart_label)")
 $(format_info_line "Display" "$(current_display_label)")
+$(format_info_line "Flash" "$(current_flash_label)")
 $(format_info_line "OTG / WiFi" "$(current_otg_label) / $(current_wifi_label)")
 EOF
 }
@@ -1120,6 +1206,33 @@ current_sdcard_label() {
     done
 
     printf '%s\n' "${SDCARD_LABELS[disabled]}"
+}
+
+current_flash_label() {
+    local overlays overlay have_emmc=0 have_nand=0
+
+    overlays="$(read_overlays)"
+    for overlay in ${overlays}; do
+        [ "${overlay}" = "${EMMC_ENABLE_OVERLAY}" ] && have_emmc=1
+        [ "${overlay}" = "${NAND_ENABLE_OVERLAY}" ] && have_nand=1
+    done
+
+    if [ "${have_emmc}" -eq 1 ] && [ "${have_nand}" -eq 1 ]; then
+        printf '%s\n' "Invalid (eMMC and NAND enabled)"
+        return 0
+    fi
+
+    if [ "${have_emmc}" -eq 1 ]; then
+        printf '%s\n' "${FLASH_LABELS[emmc]}"
+        return 0
+    fi
+
+    if [ "${have_nand}" -eq 1 ]; then
+        printf '%s\n' "${FLASH_LABELS[nand]}"
+        return 0
+    fi
+
+    printf '%s\n' "${FLASH_LABELS[auto]} (boot.cmd managed)"
 }
 
 current_otg_label() {
@@ -1274,6 +1387,21 @@ select_sdcard_menu() {
     apply_sdcard_choice "${selection}" || true
 }
 
+select_flash_menu() {
+    local selection
+    local warning
+
+    warning="\Z1WARNING:\Zn eMMC and NAND cannot be enabled at the same time.\n\Z1WARNING:\Zn Do not configure this manually for normal boot.\n\nboot.cmd already manages internal flash overlays automatically.\nUse this menu only when booting from USB and you need access to eMMC or NAND.\n\nCurrent: $(current_flash_label)"
+
+    selection="$(dialog_menu \
+        "${warning}" \
+        "auto" "Automatic (Recommended)" \
+        "emmc" "Enable eMMC and disable NAND" \
+        "nand" "Enable NAND and disable eMMC")" || return 1
+
+    apply_flash_choice "${selection}" || true
+}
+
 select_otg_menu() {
     local selection
 
@@ -1360,6 +1488,13 @@ UART Off  : no UART overlay
 SD On     : ${SDCARD_ENABLE_OVERLAY}
 SD Off    : no SD Card overlay
 
+Internal Flash
+--------------
+Automatic : no manual flash overlay, boot.cmd manages boot media
+eMMC On   : ${EMMC_ENABLE_OVERLAY}
+NAND On   : ${NAND_ENABLE_OVERLAY}
+Warning   : eMMC and NAND must never be enabled together
+
 Display / OTG
 -------------
 1080p      : ${DISPLAY_MODES[1080p]}
@@ -1400,12 +1535,15 @@ DDR Choices
 Notes
 -----
 - Wi-Fi, UART, SD Card, USB OTG and DDR update /boot/armbianEnv.txt overlays=
+- NAND / eMMC also update /boot/armbianEnv.txt overlays=
 - Display updates /boot/armbianEnv.txt extraargs=
 - The script writes ${WIFI_STATE_CONF} with the selected Wi-Fi driver
 - The script installs ${WIFI_LOADER_SERVICE} to load the selected Wi-Fi driver later in boot
 - The script writes ${BLACKLIST_MODPROBE_CONF} to block unsupported onboard Wi-Fi drivers
 - Legacy ${LEGACY_MODULES_LOAD_CONF} is removed to avoid early boot module loading
 - Wi-Fi modules are only loaded on boot because the new DT overlay is only active after reboot
+- boot.cmd already switches NAND / eMMC overlays automatically during normal boot
+- Manual NAND / eMMC selection is intended for USB boot cases where internal flash must be accessed
 - CPU max/governor options are applied immediately through sysfs and also saved to ${CPUFREQUTILS_CONF}
 - DDR changes apply after reboot
 - A reboot is recommended after changes"
@@ -1439,6 +1577,7 @@ main_menu() {
             "wifi" "Select Wi-Fi Interface" \
             "display" "Select Display Resolution" \
             "otg" "Select USB OTG Boot Mode" \
+            "flash" "NAND / eMMC Configuration" \
             "summary" "Show Current Summary" \
             "help" "Show Overlay and Driver Mapping" \
             "finish" "Save and Exit")" || break
@@ -1464,6 +1603,9 @@ main_menu() {
                 ;;
             otg)
                 select_otg_menu || true
+                ;;
+            flash)
+                select_flash_menu || true
                 ;;
             summary)
                 show_summary
