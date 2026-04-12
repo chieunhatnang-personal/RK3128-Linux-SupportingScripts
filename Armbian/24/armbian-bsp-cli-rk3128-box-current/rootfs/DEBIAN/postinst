@@ -35,7 +35,11 @@ set +e # NO ERROR CONTROL, for compatibility with legacy Armbian scripts.
         fi;
         [ -f /boot/boot.ini ] && sed -i "s/setenv rootdev.*/setenv rootdev \\"$rootdev\\"/" /boot/boot.ini;
         [ -f /boot/boot.ini ] && sed -i "s/setenv rootfstype.*/setenv rootfstype \\"$rootfstype\\"/" /boot/boot.ini;
-        [ -f /boot/boot.cmd ] && mkimage -C none -A arm -T script -d /boot/boot.cmd /boot/boot.scr > /dev/null 2>&1;
+        if [ -f /usr/share/armbian/boot.scr ]; then
+            cp -v /usr/share/armbian/boot.scr /boot/boot.scr;
+        elif [ -f /boot/boot.cmd ]; then
+            mkimage -C none -A arm -T script -d /boot/boot.cmd /boot/boot.scr > /dev/null 2>&1;
+        fi;
     fi
 ## end contents of 'board_side_bsp_cli_postinst_update_uboot_bootscript'
 

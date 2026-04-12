@@ -82,7 +82,10 @@ fi
 if test "${devtype}" = "mmc"; then
     setenv bootdev_desc "MMC device ${devnum}"
 
-    # RK3128 boards wire the first MMC controller as eMMC and the second as SD.
+    # RK3128 uses stable MMC aliases:
+    #   mmc0 = eMMC
+    #   mmc1 = external SD slot
+    #   mmc2 = SDIO (Wi-Fi, not a boot medium)
     if test "${devnum}" = "0"; then
         setenv boot_source emmc
         setenv bootdev_desc "eMMC (mmc device ${devnum})"
