@@ -76,6 +76,31 @@ sleep 2
 echo "=== Locate images ==="
 CURRENT_DIR=$(pwd)
 
+prompt_for_file_path() {
+    local label="$1"
+    local path
+
+    while true; do
+        read -rp "Enter path to $label: " path
+
+        if [[ -z "$path" ]]; then
+            echo "No path entered. Aborting." >&2
+            exit 1
+        fi
+
+        if [[ "$path" != /* ]]; then
+            path="$CURRENT_DIR/$path"
+        fi
+
+        if [[ -f "$path" ]]; then
+            printf '%s\n' "$path"
+            return
+        fi
+
+        echo "File not found: $path" >&2
+    done
+}
+
 find_required_file() {
     local filename="$1"
     local matches=()
@@ -84,7 +109,8 @@ find_required_file() {
 
     if (( ${#matches[@]} == 0 )); then
         echo "Required file not found in $CURRENT_DIR: $filename" >&2
-        exit 1
+        prompt_for_file_path "$filename"
+        return
     fi
 
     if (( ${#matches[@]} > 1 )); then
@@ -108,7 +134,8 @@ choose_rootfs_file() {
 
     if (( ${#matches[@]} == 0 )); then
         echo "No files containing 'rootfs' found in $CURRENT_DIR" >&2
-        exit 1
+        prompt_for_file_path "rootfs image"
+        return
     fi
 
     echo "Available rootfs files in $CURRENT_DIR:" >&2
