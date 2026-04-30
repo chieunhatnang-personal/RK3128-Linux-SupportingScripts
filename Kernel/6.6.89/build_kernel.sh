@@ -33,6 +33,8 @@ usage() {
   echo "  KERNEL_DIR=/path/to/kernel            (priority: env > in-file KERNEL_DIR > auto-detect)"
   echo "  RK_DEFCONFIG=rk3128_linux_tvbox_defconfig   (default: rk3128_linux_tvbox_defconfig)"
   echo "  RK_DTS=rk3128-linux                   (default: rk3128-linux -> rk3128-linux.dtb)"
+  echo "  RK_BUILD_DIR=/path/to/build           (default: <kernel-parent>/build)"
+  echo "  RK_OUT_DIR=/path/to/out               (default: <kernel-parent>/out)"
   echo "  KDEB_SOURCENAME=linux-rk3128          (default in deb mode)"
   echo "  KDEB_PKGVERSION=<version>             (default in deb mode: <kernelrelease>-<buildno>)"
 }
@@ -535,8 +537,8 @@ else
   KERNEL_DIR="$(find_kernel_dir)"
 fi
 ROOT_DIR="$(dirname "${KERNEL_DIR}")"
-BUILD_DIR="${ROOT_DIR}/build"
-OUT_DIR="${ROOT_DIR}/out"
+BUILD_DIR="${RK_BUILD_DIR:-${ROOT_DIR}/build}"
+OUT_DIR="${RK_OUT_DIR:-${ROOT_DIR}/out}"
 OVERLAY_OUT_DIR="${OUT_DIR}/overlay"
 MODULES_STAGING_DIR="${OUT_DIR}/modules"
 

@@ -20,3 +20,5 @@ Armbian/24/armbian-bsp-cli-rk3128-box-current_26.2.1_armhf.deb
 Armbian/24/armbian_rootfs.img
 Kernel/6.6.89/reference/rk322x-box.dts
 Kernel/6.6.89/reference/rk322x-box.dtb
+fb.txt
+armbianforum.txt
