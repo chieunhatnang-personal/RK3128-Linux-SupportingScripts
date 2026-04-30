@@ -16,6 +16,7 @@ usage() {
     echo "  $0 u                  # unmount image"
     echo "  $0 e <image> [size]   # extend filesystem image (default: ${DEFAULT_EXTEND_SIZE})"
     echo "  $0 s <image>          # shrink filesystem image, repacking if needed"
+    echo "  $0 o <image>          # optimize rootfs image, shrink, refresh fstab UUID, final fsck"
     exit "$status"
 }
 
@@ -460,6 +461,10 @@ mount_chroot_binds() {
         sudo mount -t proc proc "$MOUNT_DIR/proc"
     fi
 
+    ensure_qemu_arm_static
+}
+
+ensure_qemu_arm_static() {
     if command -v qemu-arm-static >/dev/null 2>&1; then
         sudo cp -f "$(command -v qemu-arm-static)" "$MOUNT_DIR/usr/bin/"
     else
@@ -481,6 +486,173 @@ chroot_image() {
     echo "Entering chroot at $MOUNT_DIR"
     echo "Exit the shell to return to the host."
     sudo chroot "$MOUNT_DIR" /usr/bin/qemu-arm-static /bin/bash
+}
+
+run_image_chroot() {
+    local script="$1"
+
+    sudo chroot "$MOUNT_DIR" /usr/bin/qemu-arm-static /usr/bin/env -i \
+        HOME=/root \
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        TERM="${TERM:-dumb}" \
+        /bin/bash -c "$script"
+}
+
+cleanup_image_contents() {
+    local home_dir="$MOUNT_DIR/home"
+    local tmp_dir="$MOUNT_DIR/tmp"
+    local var_tmp_dir="$MOUNT_DIR/var/tmp"
+    local apt_cache_dir="$MOUNT_DIR/var/cache/apt/archives"
+    local apt_lists_dir="$MOUNT_DIR/var/lib/apt/lists"
+    local log_dir="$MOUNT_DIR/var/log"
+    local machine_id="$MOUNT_DIR/etc/machine-id"
+    local dbus_machine_id="$MOUNT_DIR/var/lib/dbus/machine-id"
+
+    echo "Removing copied .deb packages from /home ..."
+    if [ -d "$home_dir" ]; then
+        sudo find "$home_dir" -xdev -type f -name "*.deb" -delete
+    fi
+
+    echo "Clearing /tmp and /var/tmp ..."
+    if [ -d "$tmp_dir" ]; then
+        sudo find "$tmp_dir" -mindepth 1 -xdev -exec rm -rf {} +
+    fi
+    if [ -d "$var_tmp_dir" ]; then
+        sudo find "$var_tmp_dir" -mindepth 1 -xdev -exec rm -rf {} +
+    fi
+
+    echo "Clearing apt archive cache ..."
+    if [ -d "$apt_cache_dir" ]; then
+        sudo find "$apt_cache_dir" -mindepth 1 -xdev -exec rm -rf {} +
+    fi
+
+    echo "Clearing apt package lists ..."
+    if [ -d "$apt_lists_dir" ]; then
+        sudo find "$apt_lists_dir" -mindepth 1 -xdev \
+            ! -name "lock" ! -name "partial" \
+            -exec rm -rf {} +
+    fi
+
+    echo "Truncating active logs and removing rotated/compressed logs ..."
+    if [ -d "$log_dir" ]; then
+        sudo find "$log_dir" -xdev -type f \
+            \( -name "*.gz" -o -name "*.[0-9]" -o -name "*.[0-9].gz" -o -name "*.old" \) \
+            -delete
+        sudo find "$log_dir" -xdev -type f \
+            ! \( -name "*.gz" -o -name "*.[0-9]" -o -name "*.[0-9].gz" -o -name "*.old" \) \
+            -exec truncate -s 0 {} +
+    fi
+
+    echo "Resetting machine-id ..."
+    if [ -e "$machine_id" ]; then
+        sudo truncate -s 0 "$machine_id"
+    else
+        sudo install -m 0644 /dev/null "$machine_id"
+    fi
+
+    if [ -e "$dbus_machine_id" ] || [ -L "$dbus_machine_id" ]; then
+        sudo rm -f "$dbus_machine_id"
+    fi
+    if [ -d "$(dirname "$dbus_machine_id")" ]; then
+        sudo ln -s /etc/machine-id "$dbus_machine_id"
+    fi
+}
+
+refresh_rootfs_uuid_in_fstab() {
+    local img="$1"
+    local temp_mount loopdev uuid fstab temp_fstab
+
+    temp_mount="$(mktemp -d /tmp/rk3128-fstab.XXXXXX)"
+    loopdev=""
+    fstab="$temp_mount/etc/fstab"
+    temp_fstab="$(mktemp /tmp/rk3128-fstab-file.XXXXXX)"
+
+    cleanup_refresh_fstab() {
+        umount_loop_image "$temp_mount" "$loopdev"
+        rm -f "$temp_fstab"
+    }
+
+    trap cleanup_refresh_fstab RETURN
+
+    loopdev="$(mount_loop_image "$img" "$temp_mount")"
+    uuid="$(sudo blkid -s UUID -o value "$loopdev" 2>/dev/null || true)"
+
+    if [ -z "$uuid" ]; then
+        die "Failed to read filesystem UUID from $loopdev"
+    fi
+
+    if [ ! -f "$fstab" ]; then
+        echo "No /etc/fstab found in image, skipping UUID refresh."
+        return 0
+    fi
+
+    if ! awk -v uuid="$uuid" '
+        BEGIN { updated = 0 }
+        /^[[:space:]]*#/ { print; next }
+        NF >= 3 && $2 == "/" && $3 == "ext4" {
+            $1 = "UUID=" uuid
+            updated = 1
+        }
+        { print }
+        END { exit(updated ? 0 : 2) }
+    ' "$fstab" >"$temp_fstab"; then
+        echo "No ext4 root entry found in /etc/fstab, skipping UUID refresh."
+        return 0
+    fi
+
+    sudo cp "$temp_fstab" "$fstab"
+    echo "Updated /etc/fstab root UUID to $uuid"
+}
+
+optimize_image_cmd() {
+    local target_img qemu_preexisting="no" first_login_backup=""
+
+    target_img="$(prepare_target_image "$1")"
+
+    if mountpoint -q "$MOUNT_DIR"; then
+        die "Mount dir is already in use: $MOUNT_DIR"
+    fi
+
+    cleanup_optimize() {
+        if [ "$qemu_preexisting" = "no" ] && [ -e "$MOUNT_DIR/usr/bin/qemu-arm-static" ]; then
+            sudo rm -f "$MOUNT_DIR/usr/bin/qemu-arm-static"
+        fi
+        if [ -n "$first_login_backup" ] && [ -f "$first_login_backup" ] && [ ! -e "$MOUNT_DIR/root/.not_logged_in_yet" ]; then
+            sudo install -m 0600 "$first_login_backup" "$MOUNT_DIR/root/.not_logged_in_yet"
+        fi
+        umount_image >/dev/null 2>&1 || true
+        rm -f "$first_login_backup"
+    }
+
+    trap cleanup_optimize RETURN
+
+    mount_image "$target_img" "no"
+    if [ -e "$MOUNT_DIR/usr/bin/qemu-arm-static" ]; then
+        qemu_preexisting="yes"
+    fi
+    if sudo test -f "$MOUNT_DIR/root/.not_logged_in_yet"; then
+        first_login_backup="$(mktemp /tmp/rk3128-firstlogin.XXXXXX)"
+        sudo cp "$MOUNT_DIR/root/.not_logged_in_yet" "$first_login_backup"
+        sudo chmod 0600 "$first_login_backup"
+    fi
+    mount_chroot_binds
+
+    echo "Refreshing apt metadata and pruning unneeded packages ..."
+    run_image_chroot "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get -y autoremove && apt-get clean"
+
+    cleanup_image_contents
+
+    cleanup_optimize
+    trap - RETURN
+
+    echo "Shrinking optimized image ..."
+    shrink_filesystem "$target_img"
+
+    echo "Refreshing root filesystem UUID in /etc/fstab ..."
+    refresh_rootfs_uuid_in_fstab "$target_img"
+
+    echo "Running final read-only filesystem check ..."
+    sudo e2fsck -f -n "$target_img"
 }
 
 umount_image() {
@@ -576,6 +748,12 @@ case "$1" in
             usage
         fi
         shrink_image_cmd "$2"
+        ;;
+    o)
+        if [ "$#" -ne 2 ]; then
+            usage
+        fi
+        optimize_image_cmd "$2"
         ;;
     *)
         usage
